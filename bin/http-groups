@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# omarchy:summary=List, create, import, export or delete HTTP client groups (one JSON file per group).
+# omarchy:args=list | new <name> | import <postman-collection.json> [name] | export <slug> | delete <slug>
+#
+#   list                    one JSON line: [{"slug","path","name"}, ...]
+#   new <name>              create <slug>.json with an empty skeleton; one JSON line {"slug","path","name"}
+#   import <file> [name]    convert a Postman v2.x collection into a new group; one JSON line
+#                           {"slug","path","name","requestCount","warnings":[...]}
+#   export <slug>           print the group as a Postman v2.1 collection (stdout)
+#   delete <slug>           delete the group file; one JSON line {"slug","path","deleted":true}
+#
+# Groups live in ${OMARCHY_HTTP_GROUPS_DIR:-~/.config/omarchy/http/groups}.
+set -uo pipefail
+
+DIR=${OMARCHY_HTTP_GROUPS_DIR:-$HOME/.config/omarchy/http/groups}
+LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)
+
+die() {
+  jq -nc --arg err "$1" '{error:$err}'
+  exit 1
+}
+
+# The panel's Process runs us via argv (no shell), so a leading ~ a user
+# types into the Import field is never shell-expanded — expand it ourselves.
+expandTilde() {
+  case $1 in
+    "~") printf '%s' "$HOME" ;;
+    "~/"*) printf '%s' "$HOME/${1#"~/"}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+slugify() {
+  local s
+  s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+  printf '%s' "${s:-group}"
+}
+
+# Prints an unused "$DIR/<slug>.json" path (base name deduped with -2, -3, ...).
+freeSlug() {
+  local base=$1 slug=$1 n=2
+  while [[ -e $DIR/$slug.json ]]; do
+    slug="$base-$n"
+    n=$((n + 1))
+  done
+  printf '%s' "$slug"
+}
+
+case ${1:-} in
+  list)
+    shopt -s nullglob
+    for f in "$DIR"/*.json; do
+      jq -c --arg path "$f" --arg slug "$(basename "$f" .json)" \
+        'select(type == "object") | {slug:$slug, path:$path, name:(.name // $slug)}' "$f" 2>/dev/null
+    done | jq -sc .
+    ;;
+  new)
+    name=${2:-}
+    [[ -n ${name//[[:space:]]/} ]] || die "group name required"
+    mkdir -p "$DIR" || die "cannot create $DIR"
+    slug=$(freeSlug "$(slugify "$name")")
+    path="$DIR/$slug.json"
+    jq -n --arg name "$name" \
+      '{name:$name, baseUrl:"", headers:{}, auth:{type:"none"}, environments:{}, activeEnv:"", requests:[]}' \
+      >"$path" || die "cannot write $path"
+    jq -nc --arg slug "$slug" --arg path "$path" --arg name "$name" '{slug:$slug, path:$path, name:$name}'
+    ;;
+  import)
+    file=$(expandTilde "${2:-}")
+    overrideName=${3:-}
+    [[ -n $file && -f $file ]] || die "missing or unreadable collection file: $file"
+    jq -e 'type == "object" and has("info") and has("item")' "$file" >/dev/null 2>&1 \
+      || die "not a Postman collection (expected an object with .info and .item): $file"
+    out=$(jq -nc --argjson collection "$(<"$file")" --arg overrideName "$overrideName" \
+      -f "$LIB_DIR/postman-import.jq") || die "failed to convert collection: $file"
+    mkdir -p "$DIR" || die "cannot create $DIR"
+    slug=$(freeSlug "$(slugify "$(jq -r '.group.name' <<<"$out")")")
+    path="$DIR/$slug.json"
+    jq '.group' <<<"$out" >"$path" || die "cannot write $path"
+    jq -c --arg slug "$slug" --arg path "$path" \
+      '{slug:$slug, path:$path, name:.group.name, requestCount:.requestCount, warnings:.warnings}' <<<"$out"
+    ;;
+  export)
+    slug=${2:-}
+    path="$DIR/$slug.json"
+    [[ -n $slug && -f $path ]] || die "unknown group: $slug"
+    jq -e 'type == "object"' "$path" >/dev/null 2>&1 || die "invalid group file: $path"
+    jq -n -L "$LIB_DIR" --argjson group "$(<"$path")" -f "$LIB_DIR/postman-export.jq" || die "failed to convert group: $slug"
+    ;;
+  delete)
+    slug=${2:-}
+    path="$DIR/$slug.json"
+    [[ -n $slug && -f $path ]] || die "unknown group: $slug"
+    rm -f "$path" || die "cannot delete $path"
+    jq -nc --arg slug "$slug" --arg path "$path" '{slug:$slug, path:$path, deleted:true}'
+    ;;
+  *)
+    die "usage: http-groups list | new <name> | import <file> [name] | export <slug> | delete <slug>"
+    ;;
+esac

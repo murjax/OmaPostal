@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# omarchy:summary=Send an HTTP request described by a JSON request file; print one JSON result line.
+# omarchy:args=<request-file>
+#
+# Request file: {"method":"GET","url":"https://...","headers":{"K":"V"},"body":"...","timeoutSec":30}
+#   Group mode (optional): add "groupFile":"/path/group.json", "env":"dev" and
+#   "path":"/relative" (or "requestName":"Saved"). The group's baseUrl, default
+#   headers and auth, and the env's {{vars}} are applied first (lib/resolve.jq).
+# Output (stdout, one JSON line):
+#   {"ok":bool,"status":int,"statusText":"...","timeMs":int,"sizeBytes":int,
+#    "headers":{"k":"v",...},"body":"...","truncated":bool,"error":"...",
+#    "resolved":{"method","url","headers"}}   # resolved: group mode only, auth masked
+#
+# "ok" is true for any completed HTTP exchange, including 4xx/5xx responses.
+# ok=false means the exchange itself never completed (bad input, DNS/connect/
+# TLS/timeout failure); "error" then carries curl's own message.
+set -uo pipefail
+
+MAX_BODY_BYTES=2000000
+
+fail() {
+  jq -n --arg err "$1" \
+    '{ok:false,status:0,statusText:"",timeMs:0,sizeBytes:0,headers:{},body:"",truncated:false,error:$err}'
+  exit 0
+}
+
+LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)
+
+req=${1:-}
+[[ -n $req && -f $req ]] || fail "missing request file"
+jq -e . "$req" >/dev/null 2>&1 || fail "invalid request file"
+
+headerFile=$(mktemp)
+bodyFile=$(mktemp)
+bodyTruncFile=$(mktemp)
+stderrFile=$(mktemp)
+effFile=$(mktemp)
+metaFile=$(mktemp)
+curlPid=""
+trap 'rm -f "$headerFile" "$bodyFile" "$bodyTruncFile" "$stderrFile" "$effFile" "$metaFile"' EXIT
+# Cancelling (TERM/INT) must take curl down too, or it would keep running until
+# its own timeout. `wait` below is interrupted by the trap, which then exits.
+trap '[[ -n $curlPid ]] && kill "$curlPid" 2>/dev/null; exit 143' TERM INT
+
+# Group mode: resolve into a plain request file, then carry on as usual.
+resolvedJson=""
+groupFile=$(jq -r '.groupFile // ""' "$req")
+if [[ -n $groupFile ]]; then
+  [[ -f $groupFile ]] || fail "group file not found: $groupFile"
+  jq -e 'type == "object"' "$groupFile" >/dev/null 2>&1 || fail "invalid group file: $groupFile"
+  resolveOut=$(jq -nc -L "$LIB_DIR" --argjson req "$(<"$req")" --argjson group "$(<"$groupFile")" \
+    --arg envName "$(jq -r '.env // ""' "$req")" -f "$LIB_DIR/resolve.jq") \
+    || fail "failed to resolve group request"
+  jq -e '.ok == true' <<<"$resolveOut" >/dev/null || fail "$(jq -r '.error' <<<"$resolveOut")"
+  jq -c --argjson orig "$(<"$req")" \
+    '{method, url, headers, body, timeoutSec: ($orig.timeoutSec // 30)}' <<<"$resolveOut" >"$effFile"
+  resolvedJson=$(jq -c '.resolved' <<<"$resolveOut")
+  req=$effFile
+fi
+
+method=$(jq -r '.method // "GET"' "$req")
+url=$(jq -r '.url // ""' "$req")
+timeoutSec=$(jq -r '(.timeoutSec // 30) | if (type == "number" and . > 0) then . else 30 end' "$req")
+body=$(jq -r '.body // ""' "$req")
+
+[[ -n $url ]] || fail "missing url"
+[[ $url == http://* || $url == https://* ]] || fail "url must start with http:// or https://"
+
+curl_args=(-sS -L --max-redirs 10 -X "$method"
+  --max-time "$timeoutSec" --connect-timeout 10
+  -D "$headerFile" -o "$bodyFile"
+  -w '%{http_code}\t%{time_total}\n')
+
+while IFS=$'\t' read -r key value; do
+  [[ -n $key ]] || continue
+  curl_args+=(-H "$key: $value")
+done < <(jq -r '.headers // {} | to_entries[] | [.key, .value] | @tsv' "$req")
+
+if [[ -n $body ]]; then
+  curl_args+=(--data-binary "$body")
+fi
+
+curl_args+=("$url")
+
+curl "${curl_args[@]}" >"$metaFile" 2>"$stderrFile" &
+curlPid=$!
+wait "$curlPid"
+rc=$?
+curlPid=""
+meta=$(<"$metaFile")
+
+if [[ $rc -ne 0 ]]; then
+  msg=$(tail -1 "$stderrFile")
+  [[ -n $msg ]] || msg="curl exited with code $rc"
+  fail "$msg"
+fi
+
+status=$(cut -f1 <<<"$meta")
+timeTotal=$(cut -f2 <<<"$meta")
+timeMs=$(awk -v t="$timeTotal" 'BEGIN { printf "%d", (t * 1000) + 0.5 }')
+sizeBytes=$(stat -c '%s' "$bodyFile" 2>/dev/null || echo 0)
+
+truncated=false
+if [[ $sizeBytes -gt $MAX_BODY_BYTES ]]; then truncated=true; fi
+# Written to a file and read back via --rawfile (not $(...)) because a bash
+# variable can't hold NUL bytes; command substitution would silently drop them.
+head -c "$MAX_BODY_BYTES" "$bodyFile" >"$bodyTruncFile"
+
+# -L makes curl dump one header block per hop, separated by a blank line;
+# only the final hop (the last non-empty block) describes the returned body.
+lastBlock=$(awk '
+  BEGIN { block = 0 }
+  { line = $0; sub(/\r$/, "", line)
+    if (line == "") { block++ } else { data[block] = data[block] line "\n" }
+  }
+  END { for (i = block; i >= 0; i--) if (data[i] != "") { printf "%s", data[i]; break } }
+' "$headerFile")
+
+statusText=$(head -1 <<<"$lastBlock" | sed -E 's/^HTTP\/[0-9.]+ [0-9]+ ?//')
+
+headersJson=$(tail -n +2 <<<"$lastBlock" | awk -F': ' '
+  NF >= 2 { key = $1; sub(/^[^:]+: ?/, ""); print key "\t" $0 }
+' | jq -R -s '
+  split("\n") | map(select(length > 0) | split("\t"))
+  | map(select(length == 2))
+  | group_by(.[0]) | map({key: .[0][0], value: (map(.[1]) | join(", "))}) | from_entries
+')
+
+jq -n \
+  --argjson status "${status:-0}" \
+  --arg statusText "$statusText" \
+  --argjson timeMs "$timeMs" \
+  --argjson sizeBytes "$sizeBytes" \
+  --argjson headers "$headersJson" \
+  --rawfile body "$bodyTruncFile" \
+  --argjson truncated "$truncated" \
+  --argjson resolved "${resolvedJson:-null}" \
+  '{ok:true,status:$status,statusText:$statusText,timeMs:$timeMs,sizeBytes:$sizeBytes,
+    headers:$headers,body:$body,truncated:$truncated,error:""}
+   + (if $resolved == null then {} else {resolved:$resolved} end)'

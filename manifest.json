@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "id": "murjax.omapostal",
+  "name": "Omapostal",
+  "version": "1.0.0",
+  "author": "murjax",
+  "description": "Postman-style HTTP request widget for the bar: saved request groups with default headers, auth and environments, plus a response viewer with history",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Omapostal",
+    "description": "Send GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS requests with custom headers and a body, and inspect status, timing, response headers and body. Keeps a history of recent requests to replay. Requests can be saved in groups (one JSON file each) that carry a base URL, default headers, default auth and named {{var}} environments.",
+    "category": "Development",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "timeoutSec": 30,
+      "historyLimit": 20
+    },
+    "schema": [
+      {
+        "key": "timeoutSec",
+        "type": "integer",
+        "label": "Request timeout (seconds)",
+        "description": "How long to wait for a response before giving up.",
+        "min": 5,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 30
+      },
+      {
+        "key": "historyLimit",
+        "type": "integer",
+        "label": "History size",
+        "description": "How many recent requests to remember for replay.",
+        "min": 1,
+        "max": 100,
+        "step": 1,
+        "defaultValue": 20
+      }
+    ]
+  }
+}

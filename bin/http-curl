@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# omarchy:summary=Print a copy-pasteable curl command line for a JSON request file; sends nothing.
+# omarchy:args=<request-file>
+#
+# Request file: same shape http-send accepts (ad-hoc {"method","url","headers",
+# "body","timeoutSec"} or group mode {"groupFile","env","path"/"requestName","auth",
+# "headers","body","timeoutSec"}). Group mode is resolved exactly like http-send
+# (lib/resolve.jq): baseUrl + path, {{vars}}, saved request, auth — all substituted
+# and UNMASKED, since the command is meant to actually run in a terminal.
+# Output (stdout, one JSON line): {"ok":bool,"curl":"...","error":"..."}
+set -uo pipefail
+
+fail() {
+  jq -n --arg err "$1" '{ok:false,curl:"",error:$err}'
+  exit 0
+}
+
+LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)
+
+req=${1:-}
+[[ -n $req && -f $req ]] || fail "missing request file"
+jq -e . "$req" >/dev/null 2>&1 || fail "invalid request file"
+
+groupFile=$(jq -r '.groupFile // ""' "$req")
+if [[ -n $groupFile ]]; then
+  [[ -f $groupFile ]] || fail "group file not found: $groupFile"
+  jq -e 'type == "object"' "$groupFile" >/dev/null 2>&1 || fail "invalid group file: $groupFile"
+  resolveOut=$(jq -nc -L "$LIB_DIR" --argjson req "$(<"$req")" --argjson group "$(<"$groupFile")" \
+    --arg envName "$(jq -r '.env // ""' "$req")" -f "$LIB_DIR/resolve.jq") \
+    || fail "failed to resolve group request"
+  jq -e '.ok == true' <<<"$resolveOut" >/dev/null || fail "$(jq -r '.error' <<<"$resolveOut")"
+  eff=$(jq -c --argjson orig "$(<"$req")" \
+    '{method, url, headers, body, timeoutSec: ($orig.timeoutSec // 30)}' <<<"$resolveOut")
+else
+  eff=$(jq -c '{method: (.method // "GET"), url: (.url // ""), headers: (.headers // {}),
+    body: (.body // ""), timeoutSec: (.timeoutSec // 30)}' "$req")
+fi
+
+url=$(jq -r '.url' <<<"$eff")
+[[ -n $url ]] || fail "missing url"
+
+curlCmd=$(jq -r <<<"$eff" '
+  ["curl", "-sS", "-L", "--max-redirs", "10", "-X", .method,
+   "--max-time", (.timeoutSec | tostring), "--connect-timeout", "10"]
+  + ((.headers | to_entries | map(["-H", (.key + ": " + (.value | tostring))]) | add) // [])
+  + (if (.body // "") != "" then ["--data-binary", .body] else [] end)
+  + [.url]
+  | @sh
+')
+
+jq -n --arg curl "$curlCmd" '{ok:true,curl:$curl,error:""}'
