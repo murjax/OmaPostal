@@ -38,14 +38,8 @@ Panel {
   property string body: ""
   property string view: "request"    // "request" | "history"
   property string reqTab: "headers"  // "headers" | "auth" | "body"
-  property string respTab: "body"    // "body" | "headers"
 
   property var reqAuth: "inherit"    // "inherit" | "none" | {type,...}; group mode only
-  property int headerRev: 0
-  readonly property var inheritedRows: {
-    root.headerRev
-    return root.group ? Groups.inheritedHeaders(root.group, root.headersObject()) : []
-  }
 
   property bool sending: false
   property bool curlCopying: false
@@ -69,41 +63,14 @@ Panel {
   property bool confirmOpen: false
   property string confirmMessage: ""
   property string pendingDeleteSlug: ""
+  property bool savedRequestsCollapsed: false
 
   readonly property color foreground: root.bar.foreground
   readonly property string fontFamily: root.bar.fontFamily
   readonly property color dim: Qt.darker(foreground, 1.4)
 
-  // ------------------------------------------------------------- headers
-
-  ListModel { id: headerModel }
-
-  function resetHeaderRows(headers) {
-    headerModel.clear()
-    var h = headers || {}
-    var keys = Object.keys(h)
-    for (var i = 0; i < keys.length; i++) headerModel.append({ key: keys[i], value: String(h[keys[i]]) })
-    if (headerModel.count === 0) headerModel.append({ key: "", value: "" })
-    // A removed/replaced row can never fire its own activeFocusChanged(false),
-    // so a structural change to the list is the safety net that untangles the
-    // focus counter from a row that no longer exists.
-    keyCatcher.headerFocusCount = 0
-    root.headerRev++
-  }
-
-  function headersObject() {
-    var out = {}
-    for (var i = 0; i < headerModel.count; i++) {
-      var row = headerModel.get(i)
-      var k = String(row.key || "").trim()
-      if (k === "") continue
-      out[k] = String(row.value || "")
-    }
-    return out
-  }
-
   Component.onCompleted: {
-    resetHeaderRows({})
+    headersEditor.load({})
     authEditor.load("inherit")
     refreshGroups()
   }
@@ -363,7 +330,7 @@ Panel {
   function saveRequestAs(name) {
     var n = String(name || "").trim()
     if (!root.group || n === "") return
-    var req = Groups.buildRequest(n, { method: root.method, url: root.url, headers: root.headersObject(), body: root.body, auth: root.reqAuth })
+    var req = Groups.buildRequest(n, { method: root.method, url: root.url, headers: headersEditor.current(), body: root.body, auth: root.reqAuth })
     root.saveGroup(Groups.upsertRequest(root.group, req))
     root.currentRequestName = n
     saveNameField.text = n
@@ -377,7 +344,7 @@ Panel {
     var oldName = root.currentRequestName
     var n = saveNameField.text.trim()
     if (n === "") n = oldName
-    var req = Groups.buildRequest(n, { method: root.method, url: root.url, headers: root.headersObject(), body: root.body, auth: root.reqAuth })
+    var req = Groups.buildRequest(n, { method: root.method, url: root.url, headers: headersEditor.current(), body: root.body, auth: root.reqAuth })
     var g = Groups.upsertRequest(root.group, req)
     if (n !== oldName) g = Groups.removeRequest(g, oldName)
     root.saveGroup(g)
@@ -412,7 +379,7 @@ Panel {
     root.pendingRequest = {
       method: root.method,
       url: trimmedUrl,
-      headers: root.headersObject(),
+      headers: headersEditor.current(),
       body: root.body,
       group: root.group ? root.slugOf(root.groupPath) : "",
       groupPath: root.group ? root.groupPath : "",
@@ -468,18 +435,6 @@ Panel {
     return (v / (1024 * 1024)).toFixed(1) + " MB"
   }
 
-  function prettyResponseBody() {
-    if (!root.response) return ""
-    var raw = String(root.response.body || "")
-    try { return JSON.stringify(JSON.parse(raw), null, 2) } catch (e) { return raw }
-  }
-
-  function responseHeadersText() {
-    if (!root.response) return ""
-    var h = root.response.headers || {}
-    return Object.keys(h).map(function (k) { return k + ": " + h[k] }).join("\n")
-  }
-
   readonly property string heroMeta: {
     if (root.sending) return "Sending…"
     if (!root.response) return "No request sent yet"
@@ -532,7 +487,6 @@ Panel {
           truncated: false, error: String(sendErr.text || "").trim() || "http-send failed" }
       }
       root.response = parsed
-      root.respTab = "body"
       root.addHistoryEntry(root.pendingRequest, parsed)
       root.pendingRequest = null
     }
@@ -576,7 +530,7 @@ Panel {
   function copyAsCurl() {
     if (!root.canSend() || root.curlCopying) return
     var trimmedUrl = root.url.trim()
-    var payload = { method: root.method, headers: root.headersObject(), body: root.body, timeoutSec: root.timeoutSec }
+    var payload = { method: root.method, headers: headersEditor.current(), body: root.body, timeoutSec: root.timeoutSec }
     if (root.group) {
       payload.groupFile = root.groupPath
       payload.env = root.envName
@@ -641,7 +595,7 @@ Panel {
     methodDropdown.value = root.method
     urlField.text = root.url
     bodyArea.text = s.body || ""
-    root.resetHeaderRows(s.headers || {})
+    headersEditor.load(s.headers || {})
     authEditor.load(s.auth === undefined ? "inherit" : s.auth)
     root.view = "request"
   }
@@ -692,11 +646,6 @@ Panel {
     copyProc.running = true
   }
 
-  function copyResponseArtifact() {
-    if (!root.response) return
-    root.copyText(root.respTab === "headers" ? root.responseHeadersText() : root.prettyResponseBody())
-  }
-
   // Panel's own manageIpc:true already registers open/close/show/hide/toggle
   // for ipcTarget — no need to redeclare an IpcHandler here.
 
@@ -737,11 +686,9 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: urlField.activeFocus || bodyArea.activeFocus || headerFocusCount > 0 || newGroupField.activeFocus || saveNameField.activeFocus || authEditor.focusCount > 0 || groupEditor.anyFocus > 0 || root.confirmOpen
+      blocked: urlField.activeFocus || bodyArea.activeFocus || headersEditor.focusCount > 0 || newGroupField.activeFocus || saveNameField.activeFocus || authEditor.focusCount > 0 || groupEditor.anyFocus > 0 || root.confirmOpen
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
-
-      property int headerFocusCount: 0
 
       ScrollView {
         id: scrollArea
@@ -1004,12 +951,34 @@ Panel {
               spacing: Style.spacing.sm
               visible: root.group !== null
 
+              Row {
+                width: parent.width
+                spacing: Style.spacing.sm
+                visible: root.group !== null && (root.group.requests || []).length > 0
+
+                PanelActionButton {
+                  id: savedRequestsToggle
+                  iconText: root.savedRequestsCollapsed ? "▸" : "▾"
+                  tooltipText: root.savedRequestsCollapsed ? "Show saved requests" : "Hide saved requests"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: root.savedRequestsCollapsed = !root.savedRequestsCollapsed
+                }
+
+                Text {
+                  text: "Saved requests (" + (root.group ? (root.group.requests || []).length : 0) + ")"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
               // Fixed-height mini-list: scrolls internally past ~5 rows
               // instead of stretching the whole (already-scrollable) panel.
               Item {
                 width: parent.width
                 height: Math.min(savedRequestsList.implicitHeight + Style.spacing.sm * 2, Style.space(200))
-                visible: root.group !== null && (root.group.requests || []).length > 0
+                visible: !root.savedRequestsCollapsed && root.group !== null && (root.group.requests || []).length > 0
 
                 BorderSurface {
                   anchors.fill: parent
@@ -1109,90 +1078,22 @@ Panel {
               fontFamily: root.fontFamily
               fontSize: Style.font.caption
               options: root.group
-                ? [ { value: "headers", label: "Headers (" + headerModel.count + ")" },
+                ? [ { value: "headers", label: "Headers (" + headersEditor.count + ")" },
                     { value: "auth", label: "Auth" },
                     { value: "body", label: "Body" } ]
-                : [ { value: "headers", label: "Headers (" + headerModel.count + ")" },
+                : [ { value: "headers", label: "Headers (" + headersEditor.count + ")" },
                     { value: "body", label: "Body" } ]
               value: root.reqTab
               onChanged: function (v) { root.reqTab = v }
             }
 
-            // ---- headers editor ----
-            Column {
+            HeadersEditor {
+              id: headersEditor
               width: parent.width
-              spacing: Style.spacing.sm
               visible: root.reqTab === "headers"
-
-              Repeater {
-                model: root.inheritedRows
-                delegate: Text {
-                  required property var modelData
-                  width: parent.width
-                  text: modelData.key + ": " + modelData.value
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.strikeout: modelData.overridden
-                  elide: Text.ElideRight
-                }
-              }
-
-              Repeater {
-                model: headerModel
-                delegate: Row {
-                  id: headerRow
-                  required property int index
-                  required property string key
-                  required property string value
-                  width: parent.width
-                  spacing: Style.spacing.sm
-
-                  TextField {
-                    width: (parent.width - removeBtn.width - parent.spacing * 2) * 0.42
-                    text: headerRow.key
-                    placeholderText: "Header"
-                    foreground: root.foreground
-                    font.pixelSize: Style.font.caption
-                    onTextChanged: { headerModel.setProperty(headerRow.index, "key", text); root.headerRev++ }
-                    onActiveFocusChanged: keyCatcher.headerFocusCount += activeFocus ? 1 : -1
-                  }
-
-                  TextField {
-                    width: (parent.width - removeBtn.width - parent.spacing * 2) * 0.58
-                    text: headerRow.value
-                    placeholderText: "Value"
-                    foreground: root.foreground
-                    font.pixelSize: Style.font.caption
-                    onTextChanged: { headerModel.setProperty(headerRow.index, "value", text); root.headerRev++ }
-                    onActiveFocusChanged: keyCatcher.headerFocusCount += activeFocus ? 1 : -1
-                  }
-
-                  PanelActionButton {
-                    id: removeBtn
-                    iconText: "×"
-                    tooltipText: "Remove header"
-                    foreground: root.foreground
-                    hoverColor: Color.urgent
-                    fontFamily: root.fontFamily
-                    onClicked: {
-                      headerModel.remove(headerRow.index)
-                      keyCatcher.headerFocusCount = 0
-                      root.headerRev++
-                    }
-                  }
-                }
-              }
-
-              Button {
-                text: "+ Add header"
-                leftAlign: true
-                bordered: true
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                fontSize: Style.font.caption
-                onClicked: { headerModel.append({ key: "", value: "" }); root.headerRev++ }
-              }
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              group: root.group
             }
 
             AuthEditor {
@@ -1236,98 +1137,12 @@ Panel {
               }
             }
 
-            // ---- response ----
-            Column {
+            ResponseViewer {
               width: parent.width
-              spacing: Style.spacing.sm
-              visible: root.response !== null
-
-              PanelSeparator { foreground: root.foreground }
-
-              Row {
-                width: parent.width
-                visible: root.response !== null && root.response.error === ""
-
-                ButtonGroup {
-                  width: parent.width - copyBtn.width
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  fontSize: Style.font.caption
-                  options: [
-                    { value: "body", label: "Response body" },
-                    { value: "headers", label: "Response headers (" + (root.response ? Object.keys(root.response.headers).length : 0) + ")" }
-                  ]
-                  value: root.respTab
-                  onChanged: function (v) { root.respTab = v }
-                }
-
-                PanelActionButton {
-                  id: copyBtn
-                  iconText: "⧉"
-                  tooltipText: root.respTab === "headers" ? "Copy response headers" : "Copy response body"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  onClicked: root.copyResponseArtifact()
-                }
-              }
-
-              Text {
-                width: parent.width
-                visible: root.response !== null && root.response.error !== ""
-                text: root.response ? root.response.error : ""
-                color: Color.urgent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-
-              Item {
-                width: parent.width
-                height: Style.space(200)
-                visible: root.response !== null && root.response.error === "" && root.respTab === "body"
-
-                BorderSurface {
-                  anchors.fill: parent
-                  color: Style.normalFill
-                  borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
-                  radius: Style.cornerRadius
-
-                  ScrollView {
-                    anchors.fill: parent
-                    anchors.margins: Style.spacing.sm
-                    clip: true
-
-                    TextEdit {
-                      readOnly: true
-                      selectByMouse: true
-                      wrapMode: TextEdit.Wrap
-                      text: root.prettyResponseBody()
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
-                  }
-                }
-              }
-
-              Column {
-                width: parent.width
-                spacing: Style.spacing.xs
-                visible: root.response !== null && root.response.error === "" && root.respTab === "headers"
-
-                Repeater {
-                  model: root.response ? Object.keys(root.response.headers) : []
-                  delegate: Text {
-                    required property string modelData
-                    width: parent.width
-                    text: modelData + ": " + root.response.headers[modelData]
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    wrapMode: Text.WrapAnywhere
-                  }
-                }
-              }
+              response: root.response
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onCopyRequested: function (text) { root.copyText(text) }
             }
           }
 
