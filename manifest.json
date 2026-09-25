@@ -1,9 +1,10 @@
 {
   "schemaVersion": 1,
   "id": "murjax.omapostal",
-  "name": "Omapostal",
+  "name": "OmaPostal",
   "version": "1.0.0",
   "author": "murjax",
+  "license": "MIT",
   "description": "Postman-style HTTP request widget for the bar: saved request groups with default headers, auth and environments, plus a response viewer with history",
   "kinds": [
     "bar-widget"
@@ -12,7 +13,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Omapostal",
+    "displayName": "OmaPostal",
     "description": "Send GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS requests with custom headers and a body, and inspect status, timing, response headers and body. Keeps a history of recent requests to replay. Requests can be saved in groups (one JSON file each) that carry a base URL, default headers, default auth and named {{var}} environments.",
     "category": "Development",
     "allowMultiple": false,

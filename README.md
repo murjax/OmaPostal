@@ -1,7 +1,61 @@
-# murjax.omapostal (Omapostal)
+# OmaPostal
 
 A small Postman-style HTTP client for the bar: method, URL, headers, body,
 and a response viewer, with a history of recent requests to replay.
+
+<table>
+<tr>
+<td width="50%">
+
+![Request tab: method/URL row, a group's saved requests list, and the headers editor](screenshots/request.png)
+
+</td>
+<td width="50%">
+
+![Response body tab showing a pretty-printed JSON array](screenshots/response.png)
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+![History tab listing recent requests with status, group/env tag, and relative time](screenshots/history.png)
+
+</td>
+<td width="50%">
+
+![Group tab: name, base URL, default headers, default auth, and environments](screenshots/group.png)
+
+</td>
+</tr>
+</table>
+
+## Requirements
+
+- Omarchy (Hyprland-based) with the Quickshell shell.
+- `bash`, `curl`, and `jq` (all standard on Omarchy) — the request-sending
+  and group-management scripts shell out to `curl` for HTTP and `jq` for
+  JSON handling.
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/murjax/OmaPostal.git --enable
+```
+
+This clones the plugin and enables it in the bar's right section (the
+default from `manifest.json`). To place it elsewhere:
+
+```bash
+omarchy bar move murjax.omapostal --after omarchy.menu
+```
+
+## Remove
+
+```bash
+omarchy plugin disable murjax.omapostal   # hide the widget, keep it installed
+omarchy plugin remove murjax.omapostal    # uninstall it entirely
+```
 
 ## Using it
 
@@ -84,7 +138,7 @@ Optional keys on the widget's `shell.json` layout entry
 ```
 
 - `timeoutSec` — per-request timeout (5–300s).
-- `historyLimit` — how many recent requests to keep.
+- `historyLimit` — how many recent requests to keep (1–100).
 
 ## Groups
 
@@ -207,13 +261,6 @@ including Postman import/export against a real fixture collection
 for the JS libraries (history de-duplication, group helpers), which need
 `node` and are skipped if it is absent.
 
-## Install / remove
-
-```
-omarchy plugin enable murjax.omapostal --after omarchy.menu
-omarchy plugin disable murjax.omapostal
-```
-
 ## Limitations
 
 - No scripts (pre-request/test), cURL import, or nested folders (Postman
@@ -229,3 +276,7 @@ omarchy plugin disable murjax.omapostal
   (e.g. multiple `Set-Cookie`) are combined into one comma-separated value.
 - Response body over 2MB is truncated for display (full status/timing/size
   metadata is still accurate).
+
+## License
+
+MIT

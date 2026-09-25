@@ -659,7 +659,7 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     text: "⇄"
-    tooltipText: "Omapostal"
+    tooltipText: "OmaPostal"
     onPressed: function (b) { root.toggle() }
   }
 
@@ -703,7 +703,7 @@ Panel {
           spacing: Style.space(12)
 
           PanelHero {
-            title: "Omapostal"
+            title: "OmaPostal"
             meta: root.heroMeta
             metaOpacity: 1.0
             foreground: root.foreground
