@@ -85,6 +85,16 @@ out=$("$BIN" "$tmp/req.json")
 printf '%s' "$out" | jq -e '.ok == true and .status == 200 and .headers["X-Test"] == "yes"' >/dev/null \
   && pass "redirect is followed to the final response" || fail "redirect: $out"
 
+# ---- oversized/streamed response is capped at transfer time, not disk-checked after -----
+
+req "{\"method\":\"GET\",\"url\":\"http://127.0.0.1:$port/stream/20000000\"}"
+out=$("$BIN" "$tmp/req.json")
+printf '%s' "$out" | jq -e '.ok == true and .status == 200 and .truncated == true' >/dev/null \
+  && pass "oversized streamed response -> ok:true, truncated:true" || fail "stream cap: $out"
+printf '%s' "$out" | jq -e '.sizeBytes > 0 and .sizeBytes < 3000000' >/dev/null \
+  && pass "curl aborts the transfer near the cap, not after downloading the full 20MB" \
+  || fail "stream cap size: $out"
+
 # ---- groups: defaults, environments, variables -------------------------------
 
 G="$tmp/group.json"

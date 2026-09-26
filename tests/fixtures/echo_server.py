@@ -9,6 +9,9 @@ Routes:
   /status/<n>   -> status <n>, empty body
   /redirect     -> 302 Location: /echo
   /sleep/<n>    -> waits <n> seconds, then 200 (for cancellation tests)
+  /stream/<n>   -> 200, writes <n> bytes with no Content-Length (HTTP/1.0,
+                connection closes to signal EOF) — simulates an
+                unbounded/streamed response for max-filesize tests
 """
 import json
 import sys
@@ -54,6 +57,23 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Length", "0")
             self.end_headers()
+            return
+
+        if route.startswith("/stream/"):
+            total = int(route.rsplit("/", 1)[-1])
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.end_headers()
+            chunk = b"x" * 65536
+            written = 0
+            try:
+                while written < total:
+                    n = min(len(chunk), total - written)
+                    self.wfile.write(chunk[:n])
+                    written += n
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            self.close_connection = True
             return
 
         if route == "/redirect":

@@ -69,6 +69,7 @@ body=$(jq -r '.body // ""' "$req")
 curl_args=(-sS -L --max-redirs 10 -X "$method"
   --max-time "$timeoutSec" --connect-timeout 10
   -D "$headerFile" -o "$bodyFile"
+  --max-filesize "$MAX_BODY_BYTES"
   -w '%{http_code}\t%{time_total}\n')
 
 while IFS=$'\t' read -r key value; do
@@ -89,7 +90,10 @@ rc=$?
 curlPid=""
 meta=$(<"$metaFile")
 
-if [[ $rc -ne 0 ]]; then
+# rc 63 (CURLE_FILESIZE_EXCEEDED) means --max-filesize aborted the transfer
+# because the response body hit MAX_BODY_BYTES — headers were already fully
+# received by then, so this is a truncated success, not a failed exchange.
+if [[ $rc -ne 0 && $rc -ne 63 ]]; then
   msg=$(tail -1 "$stderrFile")
   [[ -n $msg ]] || msg="curl exited with code $rc"
   fail "$msg"
@@ -101,7 +105,7 @@ timeMs=$(awk -v t="$timeTotal" 'BEGIN { printf "%d", (t * 1000) + 0.5 }')
 sizeBytes=$(stat -c '%s' "$bodyFile" 2>/dev/null || echo 0)
 
 truncated=false
-if [[ $sizeBytes -gt $MAX_BODY_BYTES ]]; then truncated=true; fi
+if [[ $rc -eq 63 || $sizeBytes -gt $MAX_BODY_BYTES ]]; then truncated=true; fi
 # Written to a file and read back via --rawfile (not $(...)) because a bash
 # variable can't hold NUL bytes; command substitution would silently drop them.
 head -c "$MAX_BODY_BYTES" "$bodyFile" >"$bodyTruncFile"
