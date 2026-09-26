@@ -8,7 +8,7 @@ import "lib/history.js" as History
 import "lib/groups.js" as Groups
 import "lib/json.js" as Json
 
-// Bar widget: a small Postman-style HTTP client.
+// Bar widget: a small HTTP client.
 //
 //   Request tab  - method + URL + Send, with Headers/Body sub-tabs and a
 //                  response viewer (status/time/size, body, headers) below.

@@ -1,7 +1,7 @@
 # OmaPostal
 
-A small Postman-style HTTP client for the bar: method, URL, headers, body,
-and a response viewer, with a history of recent requests to replay.
+A small HTTP client for the bar: method, URL, headers, body, and a response
+viewer, with a history of recent requests to replay.
 
 <table>
 <tr>
