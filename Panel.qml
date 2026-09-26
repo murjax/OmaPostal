@@ -6,6 +6,7 @@ import qs.Ui
 import qs.Commons
 import "lib/history.js" as History
 import "lib/groups.js" as Groups
+import "lib/json.js" as Json
 
 // Bar widget: a small Postman-style HTTP client.
 //
@@ -121,8 +122,7 @@ Panel {
   }
 
   function loadGroupText(text) {
-    var g = null
-    try { g = JSON.parse(text) } catch (e) { g = null }
+    var g = Json.tryParse(text, null)
     if (!g || typeof g !== "object") { root.group = null; return }
     root.group = g
     var envs = Object.keys(g.environments || {})
@@ -198,6 +198,18 @@ Panel {
     if (cb) cb()
   }
 
+  // Shared by every group/curl process's onExited: report success or failure
+  // via importMessage instead of each handler setting the pair by hand.
+  function setImportMessage(text, isError) {
+    root.importMessage = text
+    root.importMessageIsError = !!isError
+  }
+
+  // `result.error` when the process reported one, else `fallback`.
+  function procError(result, fallback) {
+    return (result && result.error) ? result.error : fallback
+  }
+
   function askDeleteGroup() {
     if (root.groupPath === "" || !root.group) return
     var slug = root.slugOf(root.groupPath)
@@ -244,8 +256,7 @@ Panel {
     id: groupsListProc
     stdout: StdioCollector { id: groupsListOut; waitForEnd: true }
     onExited: {
-      var list = null
-      try { list = JSON.parse(String(groupsListOut.text || "[]")) } catch (e) { list = null }
+      var list = Json.tryParse(String(groupsListOut.text || "[]"), null)
       if (!Array.isArray(list)) list = null
       // A stale run may predate a just-created group; rerun before judging.
       if (root.refreshPending) {
@@ -267,8 +278,7 @@ Panel {
     id: groupsNewProc
     stdout: StdioCollector { id: groupsNewOut; waitForEnd: true }
     onExited: {
-      var made = null
-      try { made = JSON.parse(String(groupsNewOut.text || "").trim()) } catch (e) { made = null }
+      var made = Json.tryParse(String(groupsNewOut.text || "").trim(), null)
       root.creatingGroup = false
       if (!made || !made.path) return
       root.refreshGroups()
@@ -280,12 +290,9 @@ Panel {
     id: groupsImportProc
     stdout: StdioCollector { id: groupsImportOut; waitForEnd: true }
     onExited: {
-      var made = null
-      try { made = JSON.parse(String(groupsImportOut.text || "").trim()) } catch (e) { made = null }
+      var made = Json.tryParse(String(groupsImportOut.text || "").trim(), null)
       if (!made || !made.path) {
-        var err = (made && made.error) ? made.error : "import failed — check the file path"
-        root.importMessage = err
-        root.importMessageIsError = true
+        root.setImportMessage(root.procError(made, "import failed — check the file path"), true)
         return
       }
       root.importingGroup = false
@@ -293,9 +300,8 @@ Panel {
       root.refreshGroups()
       root.selectGroup(made.path)
       var warnings = made.warnings || []
-      root.importMessage = "Imported " + made.requestCount + " request(s) as \"" + made.name + "\""
-        + (warnings.length > 0 ? " — " + warnings.length + " warning(s): " + warnings.join("; ") : "")
-      root.importMessageIsError = false
+      root.setImportMessage("Imported " + made.requestCount + " request(s) as \"" + made.name + "\""
+        + (warnings.length > 0 ? " — " + warnings.length + " warning(s): " + warnings.join("; ") : ""), false)
     }
   }
 
@@ -306,17 +312,14 @@ Panel {
     stdout: StdioCollector { id: groupsExportOut; waitForEnd: true }
     onExited: {
       var text = String(groupsExportOut.text || "").trim()
-      var made = null
-      try { made = JSON.parse(text) } catch (e) { made = null }
+      var made = Json.tryParse(text, null)
       if (!made || !made.info) {
-        root.importMessage = (made && made.error) ? made.error : "export failed"
-        root.importMessageIsError = true
+        root.setImportMessage(root.procError(made, "export failed"), true)
         return
       }
       exportCopyProc.command = ["wl-copy", "--trim-newline", text]
       exportCopyProc.running = true
-      root.importMessage = "Copied Postman collection to clipboard"
-      root.importMessageIsError = false
+      root.setImportMessage("Copied Postman collection to clipboard", false)
     }
   }
 
@@ -324,15 +327,12 @@ Panel {
     id: groupsDeleteProc
     stdout: StdioCollector { id: groupsDeleteOut; waitForEnd: true }
     onExited: {
-      var made = null
-      try { made = JSON.parse(String(groupsDeleteOut.text || "").trim()) } catch (e) { made = null }
+      var made = Json.tryParse(String(groupsDeleteOut.text || "").trim(), null)
       if (!made || !made.deleted) {
-        root.importMessage = (made && made.error) ? made.error : "delete failed"
-        root.importMessageIsError = true
+        root.setImportMessage(root.procError(made, "delete failed"), true)
         return
       }
-      root.importMessage = "Group deleted."
-      root.importMessageIsError = false
+      root.setImportMessage("Group deleted.", false)
       // groupsListProc's onExited already falls back to ad-hoc if the
       // currently-selected group has vanished from the refreshed list.
       root.refreshGroups()
@@ -401,6 +401,23 @@ Panel {
     return root.url.trim() !== "" && !root.sending
   }
 
+  // The {method,headers,body,timeoutSec,...} sent to http-send/http-curl:
+  // group requests resolve against groupFile/env/path/auth, ad-hoc ones
+  // carry a plain url. Shared by send() and copyAsCurl() so the two stay
+  // in sync on what a request actually consists of.
+  function buildRequestPayload(trimmedUrl, headers) {
+    var payload = { method: root.method, headers: headers, body: root.body, timeoutSec: root.timeoutSec }
+    if (root.group) {
+      payload.groupFile = root.groupPath
+      payload.env = root.envName
+      payload.path = trimmedUrl
+      payload.auth = root.reqAuth
+    } else {
+      payload.url = trimmedUrl
+    }
+    return payload
+  }
+
   function send() {
     if (!canSend()) return
     if (root.groupPath !== "" && !root.group) {
@@ -413,32 +430,20 @@ Panel {
     root.sendSeq++
     root.sending = true
     root.response = null
+    var headers = headersEditor.current()
     root.pendingRequest = {
       method: root.method,
       url: trimmedUrl,
-      headers: headersEditor.current(),
+      headers: headers,
       body: root.body,
       group: root.group ? root.slugOf(root.groupPath) : "",
       groupPath: root.group ? root.groupPath : "",
       env: root.group ? root.envName : ""
     }
-    var payload = {
-      method: root.method,
-      headers: root.pendingRequest.headers,
-      body: root.body,
-      timeoutSec: root.timeoutSec,
-      // Resending an identical request would write byte-identical file content;
-      // a changing nonce guarantees FileView sees a real write and fires onSaved.
-      nonce: Date.now() + "-" + Math.random().toString(36).slice(2, 8)
-    }
-    if (root.group) {
-      payload.groupFile = root.groupPath
-      payload.env = root.envName
-      payload.path = trimmedUrl
-      payload.auth = root.reqAuth
-    } else {
-      payload.url = trimmedUrl
-    }
+    var payload = root.buildRequestPayload(trimmedUrl, headers)
+    // Resending an identical request would write byte-identical file content;
+    // a changing nonce guarantees FileView sees a real write and fires onSaved.
+    payload.nonce = Date.now() + "-" + Math.random().toString(36).slice(2, 8)
     requestFile.setText(JSON.stringify(payload))
   }
 
@@ -517,8 +522,7 @@ Panel {
       }
       if (sendProc.seq !== root.sendSeq || !root.sending) return   // cancelled or superseded
       root.sending = false
-      var parsed = null
-      try { parsed = JSON.parse(String(sendOut.text || "").trim()) } catch (e) { /* fall through */ }
+      var parsed = Json.tryParse(String(sendOut.text || "").trim(), null)
       if (!parsed) {
         parsed = { ok: false, status: 0, statusText: "", timeMs: 0, sizeBytes: 0, headers: {}, body: "",
           truncated: false, error: String(sendErr.text || "").trim() || "http-send failed" }
@@ -536,8 +540,7 @@ Panel {
     onSaved: curlProc.running = true
     onSaveFailed: {
       root.curlCopying = false
-      root.importMessage = "failed to write curl request file"
-      root.importMessageIsError = true
+      root.setImportMessage("failed to write curl request file", true)
     }
   }
 
@@ -547,17 +550,13 @@ Panel {
     stderr: StdioCollector { id: curlErr; waitForEnd: true }
     onExited: function (code) {
       root.curlCopying = false
-      var parsed = null
-      try { parsed = JSON.parse(String(curlOut.text || "").trim()) } catch (e) { /* fall through */ }
+      var parsed = Json.tryParse(String(curlOut.text || "").trim(), null)
       if (!parsed || !parsed.ok) {
-        root.importMessage = (parsed && parsed.error) ? parsed.error
-          : (String(curlErr.text || "").trim() || "failed to build curl command")
-        root.importMessageIsError = true
+        root.setImportMessage(root.procError(parsed, String(curlErr.text || "").trim() || "failed to build curl command"), true)
         return
       }
       root.copyText(parsed.curl)
-      root.importMessage = "Copied curl command to clipboard"
-      root.importMessageIsError = false
+      root.setImportMessage("Copied curl command to clipboard", false)
     }
   }
 
@@ -567,15 +566,7 @@ Panel {
   function copyAsCurl() {
     if (!root.canSend() || root.curlCopying) return
     var trimmedUrl = root.url.trim()
-    var payload = { method: root.method, headers: headersEditor.current(), body: root.body, timeoutSec: root.timeoutSec }
-    if (root.group) {
-      payload.groupFile = root.groupPath
-      payload.env = root.envName
-      payload.path = trimmedUrl
-      payload.auth = root.reqAuth
-    } else {
-      payload.url = trimmedUrl
-    }
+    var payload = root.buildRequestPayload(trimmedUrl, headersEditor.current())
     root.curlCopying = true
     curlProc.command = [root.scriptDir + "/http-curl", curlRequestFile.path]
     curlRequestFile.setText(JSON.stringify(payload))
@@ -613,12 +604,8 @@ Panel {
   }
 
   function loadHistoryText(text) {
-    try {
-      var v = JSON.parse(text || "[]")
-      root.history = Array.isArray(v) ? History.dedupe(v) : []
-    } catch (e) {
-      root.history = []
-    }
+    var v = Json.tryParse(text || "[]", [])
+    root.history = Array.isArray(v) ? History.dedupe(v) : []
   }
 
   function applyRequestState(s) {

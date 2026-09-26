@@ -10,14 +10,9 @@ Column {
 
   property color foreground
   property string fontFamily
-  // Focus is derived from live fields, never counted: a counter can be
-  // knocked out of sync by rows that are rebuilt or removed. Row fields
-  // register in `focused` (by unique id) and unregister on destruction.
-  property var focused: ({})
-  property int uidSeq: 0
   // Panel blocks its key shortcuts while this is > 0.
   readonly property int anyFocus: (nameField.activeFocus ? 1 : 0) + (baseField.activeFocus ? 1 : 0)
-    + (newEnvField.activeFocus ? 1 : 0) + Object.keys(ge.focused).length + authEditor.focusCount
+    + (newEnvField.activeFocus ? 1 : 0) + headerRowsEditor.focusCount + varRowsEditor.focusCount + authEditor.focusCount
 
   property var draft: ({})
   property string editEnv: ""     // environment whose variables are shown
@@ -29,13 +24,6 @@ Column {
 
   ListModel { id: headerRows }
   ListModel { id: varRows }
-
-  function trackFocus(id, active) {
-    var m = Object.assign({}, ge.focused)   // reassign so bindings re-evaluate
-    if (active) m[id] = true
-    else delete m[id]
-    ge.focused = m
-  }
 
   function fill(model, obj) {
     model.clear()
@@ -116,70 +104,6 @@ Column {
     font.pixelSize: Style.font.caption
   }
 
-  component KeyValueRows: Column {
-    id: kv
-    property var model
-    property string keyPlaceholder: "Key"
-    property string valuePlaceholder: "Value"
-    width: ge.width
-    spacing: Style.spacing.sm
-
-    Repeater {
-      model: kv.model
-      delegate: Row {
-        id: rowItem
-        required property int index
-        required property string key
-        required property string value
-        property int uid: -1
-        width: kv.width
-        spacing: Style.spacing.sm
-        Component.onCompleted: rowItem.uid = ge.uidSeq++
-        Component.onDestruction: { ge.trackFocus(rowItem.uid + "k", false); ge.trackFocus(rowItem.uid + "v", false) }
-
-        TextField {
-          width: (parent.width - rmBtn.width - parent.spacing * 2) * 0.42
-          text: rowItem.key
-          placeholderText: kv.keyPlaceholder
-          foreground: ge.foreground
-          font.pixelSize: Style.font.caption
-          onTextChanged: kv.model.setProperty(rowItem.index, "key", text)
-          onActiveFocusChanged: ge.trackFocus(rowItem.uid + "k", activeFocus)
-        }
-
-        TextField {
-          width: (parent.width - rmBtn.width - parent.spacing * 2) * 0.58
-          text: rowItem.value
-          placeholderText: kv.valuePlaceholder
-          foreground: ge.foreground
-          font.pixelSize: Style.font.caption
-          onTextChanged: kv.model.setProperty(rowItem.index, "value", text)
-          onActiveFocusChanged: ge.trackFocus(rowItem.uid + "v", activeFocus)
-        }
-
-        PanelActionButton {
-          id: rmBtn
-          iconText: "×"
-          tooltipText: "Remove"
-          foreground: ge.foreground
-          hoverColor: Color.urgent
-          fontFamily: ge.fontFamily
-          onClicked: kv.model.remove(rowItem.index)
-        }
-      }
-    }
-
-    Button {
-      text: "+ Add"
-      leftAlign: true
-      bordered: true
-      foreground: ge.foreground
-      fontFamily: ge.fontFamily
-      fontSize: Style.font.caption
-      onClicked: kv.model.append({ key: "", value: "" })
-    }
-  }
-
   SectionLabel { text: "Name" }
   TextField {
     id: nameField
@@ -198,7 +122,15 @@ Column {
   }
 
   SectionLabel { text: "Default headers" }
-  KeyValueRows { model: headerRows; keyPlaceholder: "Header"; valuePlaceholder: "Value" }
+  KeyValueRows {
+    id: headerRowsEditor
+    width: ge.width
+    model: headerRows
+    keyPlaceholder: "Header"
+    valuePlaceholder: "Value"
+    foreground: ge.foreground
+    fontFamily: ge.fontFamily
+  }
 
   SectionLabel { text: "Default auth" }
   AuthEditor {
@@ -261,10 +193,14 @@ Column {
   }
 
   KeyValueRows {
+    id: varRowsEditor
     visible: ge.editEnv !== ""
+    width: ge.width
     model: varRows
     keyPlaceholder: "Variable"
     valuePlaceholder: "Value"
+    foreground: ge.foreground
+    fontFamily: ge.fontFamily
   }
 
   Button {

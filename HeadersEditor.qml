@@ -14,7 +14,7 @@ Column {
   property color foreground
   property string fontFamily
   property var group: null     // group file, for the inherited-headers overlay
-  property int focusCount: 0
+  readonly property int focusCount: rowsEditor.focusCount
   readonly property int count: rows.count
 
   spacing: Style.spacing.sm
@@ -46,10 +46,6 @@ Column {
     var keys = Object.keys(h)
     for (var i = 0; i < keys.length; i++) rows.append({ key: keys[i], value: String(h[keys[i]]) })
     if (rows.count === 0) rows.append({ key: "", value: "" })
-    // A removed/replaced row can never fire its own activeFocusChanged(false),
-    // so a structural change to the list is the safety net that untangles the
-    // focus counter from a row that no longer exists.
-    ed.focusCount = 0
     ed.rev++
   }
 
@@ -67,59 +63,16 @@ Column {
     }
   }
 
-  Repeater {
+  KeyValueRows {
+    id: rowsEditor
+    width: ed.width
     model: rows
-    delegate: Row {
-      id: headerRow
-      required property int index
-      required property string key
-      required property string value
-      width: parent.width
-      spacing: Style.spacing.sm
-
-      TextField {
-        width: (parent.width - removeBtn.width - parent.spacing * 2) * 0.42
-        text: headerRow.key
-        placeholderText: "Header"
-        foreground: ed.foreground
-        font.pixelSize: Style.font.caption
-        onTextChanged: { rows.setProperty(headerRow.index, "key", text); ed.rev++ }
-        onActiveFocusChanged: ed.focusCount += activeFocus ? 1 : -1
-      }
-
-      TextField {
-        width: (parent.width - removeBtn.width - parent.spacing * 2) * 0.58
-        text: headerRow.value
-        placeholderText: "Value"
-        foreground: ed.foreground
-        font.pixelSize: Style.font.caption
-        onTextChanged: { rows.setProperty(headerRow.index, "value", text); ed.rev++ }
-        onActiveFocusChanged: ed.focusCount += activeFocus ? 1 : -1
-      }
-
-      PanelActionButton {
-        id: removeBtn
-        iconText: "×"
-        tooltipText: "Remove header"
-        foreground: ed.foreground
-        hoverColor: Color.urgent
-        fontFamily: ed.fontFamily
-        onClicked: {
-          rows.remove(headerRow.index)
-          ed.focusCount = 0
-          ed.rev++
-        }
-      }
-    }
-  }
-
-  Button {
-    text: "+ Add header"
-    leftAlign: true
-    bordered: true
+    keyPlaceholder: "Header"
+    valuePlaceholder: "Value"
+    addLabel: "+ Add header"
+    removeTooltip: "Remove header"
     foreground: ed.foreground
     fontFamily: ed.fontFamily
-    fontSize: Style.font.caption
-    onClicked: { rows.append({ key: "", value: "" }); ed.rev++ }
+    onEdited: ed.rev++
   }
 }
