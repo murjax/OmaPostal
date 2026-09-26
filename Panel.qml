@@ -26,8 +26,13 @@ Panel {
 
   readonly property string scriptDir: Qt.resolvedUrl(".").toString().replace("file://", "") + "/bin"
   readonly property string historyPath: Quickshell.env("HOME") + "/.local/state/omarchy/murjax-http-history.json"
-  readonly property string requestPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/murjax-http-request.json"
-  readonly property string curlRequestPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/murjax-http-curl-request.json"
+  // XDG_RUNTIME_DIR is per-user and mode 0700; never fall back to the shared,
+  // world-writable /tmp for files that can carry a request's Authorization
+  // header or other auth in plain text. Falling back under $HOME keeps the
+  // same "nobody else can read or symlink-race this" guarantee.
+  readonly property string scratchDir: Quickshell.env("XDG_RUNTIME_DIR") || (Quickshell.env("HOME") + "/.cache/omarchy/murjax.omapostal")
+  readonly property string requestPath: root.scratchDir + "/murjax-http-request.json"
+  readonly property string curlRequestPath: root.scratchDir + "/murjax-http-curl-request.json"
 
   readonly property int timeoutSec: Math.max(5, parseInt(setting("timeoutSec", 30), 10) || 30)
   readonly property int historyLimit: Math.max(1, parseInt(setting("historyLimit", 20), 10) || 20)
