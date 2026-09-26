@@ -62,8 +62,9 @@ Panel {
   property bool importMessageIsError: false
   property bool confirmOpen: false
   property string confirmMessage: ""
-  property string pendingDeleteSlug: ""
+  property var confirmCallback: null
   property bool savedRequestsCollapsed: false
+  property string savedRequestsFilter: ""
 
   readonly property color foreground: root.bar.foreground
   readonly property string fontFamily: root.bar.fontFamily
@@ -175,24 +176,36 @@ Panel {
     groupsExportProc.running = true
   }
 
-  function askDeleteGroup() {
-    if (root.groupPath === "" || !root.group) return
-    root.pendingDeleteSlug = root.slugOf(root.groupPath)
-    root.confirmMessage = "Delete group \"" + (root.group.name || root.pendingDeleteSlug) + "\"? This cannot be undone."
+  // Generic confirm-before-destructive-action flow: askConfirm() shows the
+  // dialog with a message and stashes the action; runConfirm() (wired to
+  // ConfirmDialog.onConfirmed) fires it. Any destructive action in the
+  // panel (delete group, delete saved request, clear history, ...) can
+  // reuse this instead of hand-rolling its own pending-state property.
+  function askConfirm(message, callback) {
+    root.confirmMessage = message
+    root.confirmCallback = callback
     root.confirmOpen = true
   }
 
   function closeConfirm() {
     root.confirmOpen = false
-    root.pendingDeleteSlug = ""
+    root.confirmCallback = null
   }
 
-  function confirmDeleteGroup() {
-    var slug = root.pendingDeleteSlug
+  function runConfirm() {
+    var cb = root.confirmCallback
     root.closeConfirm()
-    if (slug === "" || groupsDeleteProc.running) return
-    groupsDeleteProc.command = [root.groupsBin, "delete", slug]
-    groupsDeleteProc.running = true
+    if (cb) cb()
+  }
+
+  function askDeleteGroup() {
+    if (root.groupPath === "" || !root.group) return
+    var slug = root.slugOf(root.groupPath)
+    root.askConfirm("Delete group \"" + (root.group.name || slug) + "\"? This cannot be undone.", function () {
+      if (slug === "" || groupsDeleteProc.running) return
+      groupsDeleteProc.command = [root.groupsBin, "delete", slug]
+      groupsDeleteProc.running = true
+    })
   }
 
   // Dropdown.value self-assigns on user interaction, which breaks a declarative
@@ -204,6 +217,13 @@ Panel {
   }
   onGroupsChanged: groupDropdown.value = root.groupLabel()
   onEnvNameChanged: envDropdown.value = root.envName
+  // Expanding the saved-requests section is almost always followed by
+  // typing a filter, so send focus straight to the search field. Deferred
+  // a turn so the field is actually visible (and focusable) by the time it
+  // lands.
+  onSavedRequestsCollapsedChanged: {
+    if (!root.savedRequestsCollapsed) Qt.callLater(function () { savedRequestsSearch.forceActiveFocus() })
+  }
   onOpenedChanged: {
     if (root.opened) root.refreshGroups()
     else root.closeConfirm()
@@ -356,6 +376,23 @@ Panel {
     if (!root.group) return
     root.saveGroup(Groups.removeRequest(root.group, name))
     if (root.currentRequestName === name) root.currentRequestName = ""
+  }
+
+  function askDeleteSavedRequest(name) {
+    root.askConfirm("Delete saved request \"" + name + "\"? This cannot be undone.", function () {
+      root.deleteSavedRequest(name)
+    })
+  }
+
+  function filteredSavedRequests() {
+    var all = root.group ? (root.group.requests || []) : []
+    var q = root.savedRequestsFilter.trim().toLowerCase()
+    if (q === "") return all
+    return all.filter(function (r) {
+      return (r.name || "").toLowerCase().indexOf(q) !== -1
+        || (r.method || "").toLowerCase().indexOf(q) !== -1
+        || (r.path || r.url || "").toLowerCase().indexOf(q) !== -1
+    })
   }
 
   // -------------------------------------------------------------- sending
@@ -618,6 +655,13 @@ Panel {
     historyFile.setText("[]\n")
   }
 
+  function askClearHistory() {
+    if (root.history.length === 0) return
+    root.askConfirm("Clear all " + root.history.length + " history entries? This cannot be undone.", function () {
+      root.clearHistory()
+    })
+  }
+
   function relTime(epoch) {
     if (!epoch) return ""
     var secs = Math.max(0, Math.floor(Date.now() / 1000) - epoch)
@@ -686,7 +730,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: urlField.activeFocus || bodyArea.activeFocus || headersEditor.focusCount > 0 || newGroupField.activeFocus || saveNameField.activeFocus || authEditor.focusCount > 0 || groupEditor.anyFocus > 0 || root.confirmOpen
+      blocked: urlField.activeFocus || bodyArea.activeFocus || headersEditor.focusCount > 0 || newGroupField.activeFocus || saveNameField.activeFocus || savedRequestsSearch.activeFocus || authEditor.focusCount > 0 || groupEditor.anyFocus > 0 || root.confirmOpen
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
 
@@ -774,20 +818,26 @@ Panel {
 
               PanelActionButton {
                 id: newGroupBtn
-                iconText: "＋"
-                tooltipText: "New group"
+                iconText: root.creatingGroup ? "✕" : "＋"
+                tooltipText: root.creatingGroup ? "Cancel new group" : "New group"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onClicked: root.creatingGroup = !root.creatingGroup
+                onClicked: {
+                  root.creatingGroup = !root.creatingGroup
+                  if (root.creatingGroup) root.importMessage = ""
+                }
               }
 
               PanelActionButton {
                 id: importGroupBtn
-                iconText: "⇩"
-                tooltipText: "Import a Postman collection"
+                iconText: root.importingGroup ? "✕" : "⇩"
+                tooltipText: root.importingGroup ? "Cancel import" : "Import a Postman collection"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onClicked: root.importingGroup = !root.importingGroup
+                onClicked: {
+                  root.importingGroup = !root.importingGroup
+                  if (root.importingGroup) root.importMessage = ""
+                }
               }
 
               PanelActionButton {
@@ -966,10 +1016,55 @@ Panel {
                 }
 
                 Text {
-                  text: "Saved requests (" + (root.group ? (root.group.requests || []).length : 0) + ")"
+                  text: {
+                    var total = root.group ? (root.group.requests || []).length : 0
+                    if (root.savedRequestsFilter.trim() === "") return "Saved requests (" + total + ")"
+                    return "Saved requests (" + root.filteredSavedRequests().length + " of " + total + ")"
+                  }
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
+
+                  MouseArea {
+                    id: savedRequestsLabelMouse
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    hoverEnabled: true
+                    onClicked: root.savedRequestsCollapsed = !root.savedRequestsCollapsed
+                  }
+
+                  PanelToolTip {
+                    visible: savedRequestsLabelMouse.containsMouse
+                    text: root.savedRequestsCollapsed ? "Show saved requests" : "Hide saved requests"
+                    fontFamily: root.fontFamily
+                  }
+                }
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.spacing.sm
+                visible: !root.savedRequestsCollapsed && root.group !== null && (root.group.requests || []).length > 0
+
+                TextField {
+                  id: savedRequestsSearch
+                  width: parent.width - (clearFilterBtn.visible ? clearFilterBtn.width + parent.spacing : 0)
+                  height: Style.spacing.controlHeight
+                  placeholderText: "Filter saved requests..."
+                  foreground: root.foreground
+                  font.pixelSize: Style.font.caption
+                  text: root.savedRequestsFilter
+                  onTextChanged: root.savedRequestsFilter = text
+                }
+
+                PanelActionButton {
+                  id: clearFilterBtn
+                  iconText: "×"
+                  tooltipText: "Clear filter"
+                  visible: root.savedRequestsFilter !== ""
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: { savedRequestsSearch.text = ""; root.savedRequestsFilter = "" }
                 }
               }
 
@@ -997,8 +1092,18 @@ Panel {
                       width: savedRequestsScroll.width
                       spacing: Style.spacing.sm
 
+                      Text {
+                        width: parent.width
+                        visible: root.filteredSavedRequests().length === 0
+                        text: "No saved requests match \"" + root.savedRequestsFilter.trim() + "\"."
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        wrapMode: Text.WrapAnywhere
+                      }
+
                       Repeater {
-                        model: root.group ? (root.group.requests || []) : []
+                        model: root.filteredSavedRequests()
                         delegate: Row {
                           required property var modelData
                           width: parent.width
@@ -1013,6 +1118,7 @@ Panel {
                             fontFamily: root.fontFamily
                             fontSize: Style.font.caption
                             text: modelData.method + "  " + modelData.name
+                            tooltipText: modelData.path || modelData.url || ""
                             onClicked: root.loadSavedRequest(modelData)
                           }
 
@@ -1023,7 +1129,7 @@ Panel {
                             foreground: root.foreground
                             hoverColor: Color.urgent
                             fontFamily: root.fontFamily
-                            onClicked: root.deleteSavedRequest(modelData.name)
+                            onClicked: root.askDeleteSavedRequest(modelData.name)
                           }
                         }
                       }
@@ -1070,6 +1176,16 @@ Panel {
                   onClicked: root.saveRequestAs(saveNameField.text)
                 }
               }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.group === null
+              text: "Select or create a group above to save and reuse requests."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
 
             ButtonGroup {
@@ -1187,7 +1303,7 @@ Panel {
               foreground: Color.urgent
               fontFamily: root.fontFamily
               fontSize: Style.font.caption
-              onClicked: root.clearHistory()
+              onClicked: root.askClearHistory()
             }
           }
 
@@ -1218,7 +1334,7 @@ Panel {
       foreground: root.foreground
       fontFamily: root.fontFamily
       onCanceled: root.closeConfirm()
-      onConfirmed: root.confirmDeleteGroup()
+      onConfirmed: root.runConfirm()
     }
   }
 }

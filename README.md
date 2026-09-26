@@ -86,19 +86,29 @@ omarchy plugin remove murjax.omapostal    # uninstall it entirely
   auth header is dropped instead of being resent as a literal `••••`.
 - **Group** and **Env** pickers sit above the URL row (the group picker
   includes "None (ad-hoc)"; the Env picker shows when the group has
-  environments). **＋** ("New group") creates a group from a name. With a
-  group selected, **×** next to the picker deletes it after a confirmation
-  prompt (no undo — falls back to "None (ad-hoc)").
+  environments). **＋** ("New group") creates a group from a name; **⇩**
+  ("Import a Postman collection") reveals the import field — either button
+  flips to **✕** ("Cancel...") while its form is open, so clicking it again
+  closes the form. With a group selected, **×** next to the picker deletes
+  it after a confirmation prompt (no undo — falls back to "None (ad-hoc)").
+  With no group selected, a hint explains that saving requests requires
+  picking or creating one.
 - With a group selected, its **saved requests** are listed in a fixed-height
   box that scrolls internally once there are more than a handful, so a big
-  group doesn't push the rest of the panel out of view; click one to
-  load it (it's highlighted while loaded). **Save** overwrites the loaded
-  request with the current fields — editing the name field first renames it,
-  dropping the old entry instead of leaving a duplicate. **Save as** always
-  saves a copy under the typed name (an existing name with that exact text
-  is overwritten), leaving the loaded request's original entry alone. **×**
-  deletes one. In group mode the URL field holds a path appended to the
-  group's base URL.
+  group doesn't push the rest of the panel out of view. Click the **Saved
+  requests** label, or its ▸/▾ arrow, to collapse or expand the section —
+  expanding it focuses the filter field below. That field narrows the list
+  by name, method, or path (the count switches from "Saved requests (N)" to
+  "Saved requests (N of M)" while filtering, with a **×** to clear it, and a
+  "No saved requests match" message if nothing does); hovering an entry
+  shows its full path. Click one to load it (it's highlighted while
+  loaded). **Save** overwrites the loaded request with the current fields —
+  editing the name field first renames it, dropping the old entry instead
+  of leaving a duplicate. **Save as** always saves a copy under the typed
+  name (an existing name with that exact text is overwritten), leaving the
+  loaded request's original entry alone. **×** deletes one, after a
+  confirmation prompt (no undo). In group mode the URL field holds a path
+  appended to the group's base URL.
 - **Auth** tab (group mode only; tabs are Headers / Auth / Body) — Inherit /
   None / Bearer / Basic / API key. Ad-hoc requests have no Auth tab; keep
   using an `Authorization` header.
@@ -221,7 +231,8 @@ temp file used to launch each request, and persistently in the history
 file at `~/.local/state/omarchy/murjax-http-history.json` (bounded by
 `historyLimit`). If you paste a bearer token or API key into a header
 while testing, it will sit in that history file until cleared. Use the
-**Clear history** button in the History tab to wipe it. History never
+**Clear history** button in the History tab to wipe it (after a
+confirmation prompt — no undo). History never
 stores auth values (bearer tokens, passwords, API keys), but it does store
 request headers you typed yourself.
 
