@@ -64,8 +64,6 @@ Panel {
   property bool confirmOpen: false
   property string confirmMessage: ""
   property var confirmCallback: null
-  property bool savedRequestsCollapsed: false
-  property string savedRequestsFilter: ""
 
   readonly property color foreground: root.bar.foreground
   readonly property string fontFamily: root.bar.fontFamily
@@ -110,7 +108,8 @@ Panel {
       return
     }
     root.currentRequestName = ""
-    saveNameField.text = ""
+    savedRequestsPanel.setName("")
+    savedRequestsPanel.clearFilter()
     authEditor.load("inherit")
     root.pendingEnv = env || ""
     root.envName = ""
@@ -229,13 +228,6 @@ Panel {
   }
   onGroupsChanged: groupDropdown.value = root.groupLabel()
   onEnvNameChanged: envDropdown.value = root.envName
-  // Expanding the saved-requests section is almost always followed by
-  // typing a filter, so send focus straight to the search field. Deferred
-  // a turn so the field is actually visible (and focusable) by the time it
-  // lands.
-  onSavedRequestsCollapsedChanged: {
-    if (!root.savedRequestsCollapsed) Qt.callLater(function () { savedRequestsSearch.forceActiveFocus() })
-  }
   onOpenedChanged: {
     if (root.opened) root.refreshGroups()
     else root.closeConfirm()
@@ -343,7 +335,7 @@ Panel {
 
   function loadSavedRequest(r) {
     root.currentRequestName = r.name
-    saveNameField.text = r.name
+    savedRequestsPanel.setName(r.name)
     root.applyRequestState({ method: r.method, url: r.path || r.url, headers: r.headers, body: r.body, auth: r.auth })
   }
 
@@ -353,7 +345,7 @@ Panel {
     var req = Groups.buildRequest(n, { method: root.method, url: root.url, headers: headersEditor.current(), body: root.body, auth: root.reqAuth })
     root.saveGroup(Groups.upsertRequest(root.group, req))
     root.currentRequestName = n
-    saveNameField.text = n
+    savedRequestsPanel.setName(n)
   }
 
   // Save (as opposed to Save as): re-save the currently loaded request in
@@ -362,14 +354,14 @@ Panel {
   function saveCurrentRequest() {
     if (root.currentRequestName === "") return
     var oldName = root.currentRequestName
-    var n = saveNameField.text.trim()
+    var n = savedRequestsPanel.name.trim()
     if (n === "") n = oldName
     var req = Groups.buildRequest(n, { method: root.method, url: root.url, headers: headersEditor.current(), body: root.body, auth: root.reqAuth })
     var g = Groups.upsertRequest(root.group, req)
     if (n !== oldName) g = Groups.removeRequest(g, oldName)
     root.saveGroup(g)
     root.currentRequestName = n
-    saveNameField.text = n
+    savedRequestsPanel.setName(n)
   }
 
   function deleteSavedRequest(name) {
@@ -381,17 +373,6 @@ Panel {
   function askDeleteSavedRequest(name) {
     root.askConfirm("Delete saved request \"" + name + "\"? This cannot be undone.", function () {
       root.deleteSavedRequest(name)
-    })
-  }
-
-  function filteredSavedRequests() {
-    var all = root.group ? (root.group.requests || []) : []
-    var q = root.savedRequestsFilter.trim().toLowerCase()
-    if (q === "") return all
-    return all.filter(function (r) {
-      return (r.name || "").toLowerCase().indexOf(q) !== -1
-        || (r.method || "").toLowerCase().indexOf(q) !== -1
-        || (r.path || r.url || "").toLowerCase().indexOf(q) !== -1
     })
   }
 
@@ -626,7 +607,7 @@ Panel {
 
   function applyHistoryEntry(entry) {
     root.currentRequestName = ""
-    saveNameField.text = ""
+    savedRequestsPanel.setName("")
     var known = entry.groupPath && root.groups.some(function (g) { return g.path === entry.groupPath })
     // selectGroup handles the same-path case (applies env directly) and the
     // different-path case (env applied via pendingEnv once the file loads).
@@ -717,7 +698,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: urlField.activeFocus || bodyArea.activeFocus || headersEditor.focusCount > 0 || newGroupField.activeFocus || saveNameField.activeFocus || savedRequestsSearch.activeFocus || authEditor.focusCount > 0 || groupEditor.anyFocus > 0 || root.confirmOpen
+      blocked: urlField.activeFocus || bodyArea.activeFocus || headersEditor.focusCount > 0 || newGroupField.activeFocus || savedRequestsPanel.anyFocus || authEditor.focusCount > 0 || groupEditor.anyFocus > 0 || root.confirmOpen
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
 
@@ -983,196 +964,17 @@ Panel {
               wrapMode: Text.WrapAnywhere
             }
 
-            Column {
+            SavedRequestsPanel {
+              id: savedRequestsPanel
               width: parent.width
-              spacing: Style.spacing.sm
-              visible: root.group !== null
-
-              Row {
-                width: parent.width
-                spacing: Style.spacing.sm
-                visible: root.group !== null && (root.group.requests || []).length > 0
-
-                PanelActionButton {
-                  id: savedRequestsToggle
-                  iconText: root.savedRequestsCollapsed ? "▸" : "▾"
-                  tooltipText: root.savedRequestsCollapsed ? "Show saved requests" : "Hide saved requests"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  onClicked: root.savedRequestsCollapsed = !root.savedRequestsCollapsed
-                }
-
-                Text {
-                  text: {
-                    var total = root.group ? (root.group.requests || []).length : 0
-                    if (root.savedRequestsFilter.trim() === "") return "Saved requests (" + total + ")"
-                    return "Saved requests (" + root.filteredSavedRequests().length + " of " + total + ")"
-                  }
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-
-                  MouseArea {
-                    id: savedRequestsLabelMouse
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    hoverEnabled: true
-                    onClicked: root.savedRequestsCollapsed = !root.savedRequestsCollapsed
-                  }
-
-                  PanelToolTip {
-                    visible: savedRequestsLabelMouse.containsMouse
-                    text: root.savedRequestsCollapsed ? "Show saved requests" : "Hide saved requests"
-                    fontFamily: root.fontFamily
-                  }
-                }
-              }
-
-              Row {
-                width: parent.width
-                spacing: Style.spacing.sm
-                visible: !root.savedRequestsCollapsed && root.group !== null && (root.group.requests || []).length > 0
-
-                TextField {
-                  id: savedRequestsSearch
-                  width: parent.width - (clearFilterBtn.visible ? clearFilterBtn.width + parent.spacing : 0)
-                  height: Style.spacing.controlHeight
-                  placeholderText: "Filter saved requests..."
-                  foreground: root.foreground
-                  font.pixelSize: Style.font.caption
-                  text: root.savedRequestsFilter
-                  onTextChanged: root.savedRequestsFilter = text
-                }
-
-                PanelActionButton {
-                  id: clearFilterBtn
-                  iconText: "×"
-                  tooltipText: "Clear filter"
-                  visible: root.savedRequestsFilter !== ""
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  onClicked: { savedRequestsSearch.text = ""; root.savedRequestsFilter = "" }
-                }
-              }
-
-              // Fixed-height mini-list: scrolls internally past ~5 rows
-              // instead of stretching the whole (already-scrollable) panel.
-              Item {
-                width: parent.width
-                height: Math.min(savedRequestsList.implicitHeight + Style.spacing.sm * 2, Style.space(200))
-                visible: !root.savedRequestsCollapsed && root.group !== null && (root.group.requests || []).length > 0
-
-                BorderSurface {
-                  anchors.fill: parent
-                  color: Style.normalFill
-                  borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
-                  radius: Style.cornerRadius
-
-                  ScrollView {
-                    id: savedRequestsScroll
-                    anchors.fill: parent
-                    anchors.margins: Style.spacing.sm
-                    clip: true
-
-                    Column {
-                      id: savedRequestsList
-                      width: savedRequestsScroll.width
-                      spacing: Style.spacing.sm
-
-                      Text {
-                        width: parent.width
-                        visible: root.filteredSavedRequests().length === 0
-                        text: "No saved requests match \"" + root.savedRequestsFilter.trim() + "\"."
-                        color: root.dim
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.caption
-                        wrapMode: Text.WrapAnywhere
-                      }
-
-                      Repeater {
-                        model: root.filteredSavedRequests()
-                        delegate: Row {
-                          required property var modelData
-                          width: parent.width
-                          spacing: Style.spacing.sm
-
-                          Button {
-                            width: parent.width - delBtn.width - parent.spacing
-                            leftAlign: true
-                            bordered: true
-                            selected: modelData.name === root.currentRequestName
-                            foreground: root.foreground
-                            fontFamily: root.fontFamily
-                            fontSize: Style.font.caption
-                            text: modelData.method + "  " + modelData.name
-                            tooltipText: modelData.path || modelData.url || ""
-                            onClicked: root.loadSavedRequest(modelData)
-                          }
-
-                          PanelActionButton {
-                            id: delBtn
-                            iconText: "×"
-                            tooltipText: "Delete saved request"
-                            foreground: root.foreground
-                            hoverColor: Color.urgent
-                            fontFamily: root.fontFamily
-                            onClicked: root.askDeleteSavedRequest(modelData.name)
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-
-              Row {
-                width: parent.width
-                spacing: Style.spacing.sm
-
-                TextField {
-                  id: saveNameField
-                  width: parent.width - saveBtn.width - saveAsBtn.width - parent.spacing * 2
-                  height: Style.spacing.controlHeight
-                  placeholderText: "Request name"
-                  foreground: root.foreground
-                  font.pixelSize: Style.font.caption
-                  onAccepted: root.saveRequestAs(text)
-                }
-
-                Button {
-                  id: saveBtn
-                  text: "Save"
-                  bordered: true
-                  enabled: root.currentRequestName !== ""
-                  opacity: enabled ? 1.0 : 0.5
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  fontSize: Style.font.caption
-                  onClicked: root.saveCurrentRequest()
-                }
-
-                Button {
-                  id: saveAsBtn
-                  text: "Save as"
-                  bordered: true
-                  enabled: saveNameField.text.trim() !== ""
-                  opacity: enabled ? 1.0 : 0.5
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  fontSize: Style.font.caption
-                  onClicked: root.saveRequestAs(saveNameField.text)
-                }
-              }
-            }
-
-            Text {
-              width: parent.width
-              visible: root.group === null
-              text: "Select or create a group above to save and reuse requests."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
+              group: root.group
+              currentRequestName: root.currentRequestName
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onLoadRequested: function (r) { root.loadSavedRequest(r) }
+              onDeleteRequested: function (name) { root.askDeleteSavedRequest(name) }
+              onSaveRequested: root.saveCurrentRequest()
+              onSaveAsRequested: function (name) { root.saveRequestAs(name) }
             }
 
             ButtonGroup {
