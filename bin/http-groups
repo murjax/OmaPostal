@@ -72,7 +72,11 @@ case ${1:-} in
     [[ -n $file && -f $file ]] || die "missing or unreadable collection file: $file"
     jq -e 'type == "object" and has("info") and has("item")' "$file" >/dev/null 2>&1 \
       || die "not a Postman collection (expected an object with .info and .item): $file"
-    out=$(jq -nc --argjson collection "$(<"$file")" --arg overrideName "$overrideName" \
+    # $collection goes in via --slurpfile (jq reads the file itself) rather
+    # than --argjson "$(<file)", which would put the whole collection —
+    # auth tokens/passwords included — on this jq process's own argv,
+    # visible to other local users via `ps`/`/proc/<pid>/cmdline`.
+    out=$(jq -nc --slurpfile collection "$file" --arg overrideName "$overrideName" \
       -f "$LIB_DIR/postman-import.jq") || die "failed to convert collection: $file"
     mkdir -p "$DIR" || die "cannot create $DIR"
     chmod 700 "$DIR" 2>/dev/null
@@ -87,7 +91,9 @@ case ${1:-} in
     path="$DIR/$slug.json"
     [[ -n $slug && -f $path ]] || die "unknown group: $slug"
     jq -e 'type == "object"' "$path" >/dev/null 2>&1 || die "invalid group file: $path"
-    jq -n -L "$LIB_DIR" --argjson group "$(<"$path")" -f "$LIB_DIR/postman-export.jq" || die "failed to convert group: $slug"
+    # $group goes in via --slurpfile for the same reason as import above:
+    # the group can carry a bearer token, API key, or basic-auth password.
+    jq -n -L "$LIB_DIR" --slurpfile group "$path" -f "$LIB_DIR/postman-export.jq" || die "failed to convert group: $slug"
     ;;
   delete)
     slug=${2:-}

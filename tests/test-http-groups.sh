@@ -116,10 +116,49 @@ printf '%s' "$tildeOut" | jq -e '.requestCount == 42' >/dev/null \
   && pass "import expands a leading ~ to \$HOME (no shell runs it for us)" || fail "import tilde path: $tildeOut"
 
 # Round trip: importing what we just exported should resolve the same URL.
-reimported=$(jq -nc --argjson collection "$out" --arg overrideName "" -f "$HERE/../lib/postman-import.jq")
+printf '%s' "$out" >"$tmp/exported.json"
+reimported=$(jq -nc --slurpfile collection "$tmp/exported.json" --arg overrideName "" -f "$HERE/../lib/postman-import.jq")
 jq -e '(.group.requests | map(select(.name == "Posts / Get All Posts")) | .[0].path) == "{{baseUrl}}/posts"' \
   <<<"$reimported" >/dev/null \
   && pass "export -> import round-trips a request's URL" || fail "round trip: $reimported"
+
+# ---- import/export secrets are not exposed to jq's own argv -----------------
+# `import`/`export` used to pass the whole Postman collection / group JSON to
+# `jq` via `--argjson name "$(<file)"`, putting a collection or group's auth
+# token/password on that jq process's own argv (readable by other local
+# users via `ps`/`/proc/<pid>/cmdline` for as long as it runs). `bash -x`
+# records each command's fully-expanded argv as it's about to run, which is a
+# precise, non-racy way to check for that — unlike scraping
+# /proc/<pid>/cmdline, which would need to win a timing race against a jq
+# process that usually exits in milliseconds.
+cat >"$tmp/secret-import.json" <<'JSON'
+{
+  "info": {"name": "Secret Collection"},
+  "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "s3cr3t-import-XYZ"}]},
+  "item": [{"name": "Req", "request": {"method": "GET", "url": "https://x.test/a"}}]
+}
+JSON
+bash -x "$BIN" import "$tmp/secret-import.json" >"$tmp/import-xtrace.out" 2>"$tmp/import-xtrace.err"
+if grep -E '^[+]+ jq ' "$tmp/import-xtrace.err" | grep -F -- "s3cr3t-import-XYZ" >/dev/null; then
+  fail "import does not expose the collection auth token via jq argv"
+else
+  pass "import does not expose the collection auth token via jq argv"
+fi
+printf '%s' "$(<"$tmp/import-xtrace.out")" | jq -e '.requestCount == 1' >/dev/null \
+  && pass "import with hidden-argv secret still succeeds" || fail "hidden-argv import: $(<"$tmp/import-xtrace.out")"
+
+cat >"$tmp/groups/secret-export.json" <<'JSON'
+{"name":"SecretExport","baseUrl":"https://x.test","auth":{"type":"bearer","token":"s3cr3t-export-ABC"},
+ "headers":{},"environments":{},"activeEnv":"","requests":[{"name":"Req","method":"GET","path":"/a"}]}
+JSON
+bash -x "$BIN" export secret-export >"$tmp/export-xtrace.out" 2>"$tmp/export-xtrace.err"
+if grep -E '^[+]+ jq ' "$tmp/export-xtrace.err" | grep -F -- "s3cr3t-export-ABC" >/dev/null; then
+  fail "export does not expose the group auth token via jq argv"
+else
+  pass "export does not expose the group auth token via jq argv"
+fi
+printf '%s' "$(<"$tmp/export-xtrace.out")" | jq -e '.auth.bearer[0].value == "s3cr3t-export-ABC"' >/dev/null \
+  && pass "export with hidden-argv secret still prints the token" || fail "hidden-argv export: $(<"$tmp/export-xtrace.out")"
 
 # ------------------------------------------------------------- delete
 path="$tmp/groups/jsonplaceholder-api.json"

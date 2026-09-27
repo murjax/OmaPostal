@@ -25,12 +25,20 @@ groupFile=$(jq -r '.groupFile // ""' "$req")
 if [[ -n $groupFile ]]; then
   [[ -f $groupFile ]] || fail "group file not found: $groupFile"
   jq -e 'type == "object"' "$groupFile" >/dev/null 2>&1 || fail "invalid group file: $groupFile"
-  resolveOut=$(jq -nc -L "$LIB_DIR" --argjson req "$(<"$req")" --argjson group "$(<"$groupFile")" \
+  # $req/$group go in via --slurpfile (jq reads the file itself) rather than
+  # --argjson "$(<file)", which would put the full request/group JSON —
+  # Authorization values, passwords, API keys included — into this jq
+  # process's own argv, visible to other local users via `ps`/
+  # `/proc/<pid>/cmdline` for as long as it runs.
+  resolveOut=$(jq -nc -L "$LIB_DIR" --slurpfile req "$req" --slurpfile group "$groupFile" \
     --arg envName "$(jq -r '.env // ""' "$req")" -f "$LIB_DIR/resolve.jq") \
     || fail "failed to resolve group request"
   jq -e '.ok == true' <<<"$resolveOut" >/dev/null || fail "$(jq -r '.error' <<<"$resolveOut")"
-  eff=$(jq -c --argjson orig "$(<"$req")" \
-    '{method, url, headers, body, timeoutSec: ($orig.timeoutSec // 30)}' <<<"$resolveOut")
+  # Only timeoutSec (a plain number) is needed from the original request here,
+  # so extract just that instead of putting the whole request back on argv.
+  origTimeoutSec=$(jq -r '(.timeoutSec // 30) | if (type == "number" and . > 0) then . else 30 end' "$req")
+  eff=$(jq -c --argjson timeoutSec "$origTimeoutSec" \
+    '{method, url, headers, body, timeoutSec: $timeoutSec}' <<<"$resolveOut")
 else
   eff=$(jq -c '{method: (.method // "GET"), url: (.url // ""), headers: (.headers // {}),
     body: (.body // ""), timeoutSec: (.timeoutSec // 30)}' "$req")
@@ -48,4 +56,12 @@ curlCmd=$(jq -r <<<"$eff" '
   | @sh
 ')
 
-jq -n --arg curl "$curlCmd" '{ok:true,curl:$curl,error:""}'
+# $curlCmd is the resolved, UNMASKED command (that's the whole point of this
+# script), so it can carry an Authorization value, password, or API key.
+# Written to a temp file and read via --rawfile instead of --arg "$curlCmd"
+# so it never sits on this jq process's own argv, even for the moment it
+# takes to build the output.
+curlCmdFile=$(mktemp)
+trap 'rm -f "$curlCmdFile"' EXIT
+printf '%s' "$curlCmd" >"$curlCmdFile"
+jq -n --rawfile curl "$curlCmdFile" '{ok:true,curl:$curl,error:""}'

@@ -1,6 +1,11 @@
 # Convert a Postman v2.x collection into a murjax.omapostal group.
-# Inputs (--argjson/--arg): $collection (the parsed collection), $overrideName
-# ("" = use the collection's own name).
+# Inputs: $collection arrives via --slurpfile (not --argjson) so the whole
+# collection — which can carry a bearer token, API key, or basic-auth
+# password in its own auth block or a request's — never appears in this jq
+# process's own argv/cmdline, only the file path does; $collection[0] below
+# unwraps the slurped single-element array back into a plain object.
+# $overrideName ("" = use the collection's own name) is passed via --arg
+# since it's just a label, not sensitive.
 # Output: {group: {...}, warnings: [...], requestCount: N}
 #
 # Folders flatten into request names joined by " / " (groups have no
@@ -8,6 +13,8 @@
 # auth types (anything but bearer/basic/apikey/noauth) and body modes (anything
 # but raw/urlencoded/graphql) are dropped with a warning rather than failing
 # the import.
+
+$collection[0] as $collection |
 
 def urlOf(u):
   if (u == null) then ""

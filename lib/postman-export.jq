@@ -1,5 +1,9 @@
 # Convert a murjax.omapostal group into a Postman v2.1 collection.
-# Input (--argjson): $group (the parsed group file).
+# Input: $group arrives via --slurpfile (not --argjson) so the whole group —
+# which can carry a bearer token, API key, or basic-auth password — never
+# appears in this jq process's own argv/cmdline, only the file path does;
+# $group[0] below unwraps the slurped single-element array back into a
+# plain object.
 # Output: the collection JSON (printed as-is by the caller).
 #
 # Only the group's *active* environment round-trips (as collection variables)
@@ -8,6 +12,8 @@
 # contain " / " if it came from an earlier import of a foldered collection.
 
 include "url";
+
+$group[0] as $group |
 
 def slugify(s):
   (s // "collection") | ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("^-+|-+$"; "");

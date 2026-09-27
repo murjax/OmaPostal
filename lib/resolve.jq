@@ -1,9 +1,16 @@
 # Resolve a group-mode request into a concrete request.
-# Inputs (--argjson/--arg): $req (the request file), $group (the group file),
-# $envName ("" = use the group's activeEnv).
+# Inputs: $req and $group arrive via --slurpfile (not --argjson) so the full
+# request/group JSON — which can carry an Authorization value, password, or
+# API key — never appears in this jq process's own argv/cmdline, only the
+# file paths do; $req[0]/$group[0] below unwrap the slurped single-element
+# arrays back into plain objects for the rest of the program. $envName
+# ("" = use the group's activeEnv) is passed via --arg since it's just a
+# label, not sensitive.
 # Output: {ok:true, method, url, headers, body, resolved:{method,url,headers}}
 #      or {ok:false, error}. `resolved` is what the UI shows: auth is masked.
 include "url";
+
+$req[0] as $req | $group[0] as $group |
 
 def substitute($vars):
   walk(if type == "string" then

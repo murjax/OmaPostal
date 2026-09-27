@@ -81,4 +81,24 @@ check '.ok == false and (.error | contains("group file not found"))' "missing gr
 send "{\"groupFile\":\"$G\",\"path\":\"/{{nope}}\"}"
 check '.ok == false and (.error | contains("undefined variable: nope"))' "undefined variable is an error naming it"
 
+# ---- group-mode secrets are not exposed to jq's own argv --------------------
+# `bin/http-curl` never runs curl itself, but it does run `jq -f resolve.jq`
+# to resolve group mode, and that step must not put the group's auth token on
+# its own argv (readable by other local users via `ps`/`/proc/<pid>/cmdline`
+# for as long as it runs) even though the final printed command is meant to
+# carry it unmasked. `bash -x` prints each command's fully-expanded argv as
+# it's about to run, giving a precise, non-racy record — unlike scraping
+# /proc/<pid>/cmdline, which would need to win a timing race against a jq
+# process that usually exits in milliseconds.
+req "{\"groupFile\":\"$G\",\"path\":\"/widgets\"}"
+bash -x "$BIN" "$tmp/req.json" >"$tmp/xtrace.out" 2>"$tmp/xtrace.err"
+if grep -E '^[+]+ jq ' "$tmp/xtrace.err" | grep -F -- "secret123" >/dev/null; then
+  fail "group-mode jq invocation does not expose the auth token via argv"
+else
+  pass "group-mode jq invocation does not expose the auth token via argv"
+fi
+out=$(<"$tmp/xtrace.out")
+check '.ok == true and (.curl | contains("Authorization: Bearer secret123"))' \
+  "group command with hidden-argv secret still prints the token"
+
 exit $((fails > 0))

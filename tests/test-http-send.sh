@@ -245,6 +245,28 @@ wait "$argvpid"
 printf '%s' "$(<"$tmp/argv.out")" | jq -e '.ok == true and .status == 200' >/dev/null \
   && pass "request with hidden-argv header still succeeds" || fail "hidden-argv request: $(<"$tmp/argv.out")"
 
+# ---- group-mode secrets are not exposed to jq's own argv either --------------
+# Same vulnerability class as the curl check above, but for the `jq -f
+# resolve.jq` step that resolves group-mode requests into a concrete one.
+# That jq process typically exits in milliseconds, too fast to reliably win a
+# race against /proc/<pid>/cmdline scraping, so this uses `bash -x` instead:
+# it prints every command's fully-expanded argv as it's about to run, giving
+# a precise, non-racy record of exactly what each jq invocation received.
+secretG="s3cr3t-group-$$-$RANDOM"
+groupSecretFile="$tmp/group-secret.json"
+cat >"$groupSecretFile" <<EOF
+{"name":"S","baseUrl":"http://127.0.0.1:$port","auth":{"type":"bearer","token":"$secretG"}}
+EOF
+req "{\"groupFile\":\"$groupSecretFile\",\"path\":\"/echo\"}"
+bash -x "$BIN" "$tmp/req.json" >"$tmp/xtrace.out" 2>"$tmp/xtrace.err"
+if grep -E '^[+]+ jq ' "$tmp/xtrace.err" | grep -F -- "$secretG" >/dev/null; then
+  fail "group-mode jq invocation does not expose the auth token via argv"
+else
+  pass "group-mode jq invocation does not expose the auth token via argv"
+fi
+printf '%s' "$(<"$tmp/xtrace.out")" | jq -e '.ok == true and .status == 200' >/dev/null \
+  && pass "group request with hidden-argv secret still succeeds" || fail "hidden-argv group request: $(<"$tmp/xtrace.out")"
+
 # A backslash in a header value or body must reach the server unchanged, not
 # doubled — regression test for jq's @tsv escaping a lone backslash to `\\`.
 req '{"method":"POST","url":"http://127.0.0.1:'"$port"'/echo","headers":{"X-Custom":"a\\b\"c"},"body":"one\\two"}'

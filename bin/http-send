@@ -50,12 +50,21 @@ groupFile=$(jq -r '.groupFile // ""' "$req")
 if [[ -n $groupFile ]]; then
   [[ -f $groupFile ]] || fail "group file not found: $groupFile"
   jq -e 'type == "object"' "$groupFile" >/dev/null 2>&1 || fail "invalid group file: $groupFile"
-  resolveOut=$(jq -nc -L "$LIB_DIR" --argjson req "$(<"$req")" --argjson group "$(<"$groupFile")" \
+  # $req/$group go in via --slurpfile (jq reads the file itself) rather than
+  # --argjson "$(<file)", which would put the full request/group JSON —
+  # Authorization values, passwords, API keys included — into this jq
+  # process's own argv, visible to other local users via `ps`/
+  # `/proc/<pid>/cmdline` for as long as it runs. Same reasoning as the
+  # curl -K config file above.
+  resolveOut=$(jq -nc -L "$LIB_DIR" --slurpfile req "$req" --slurpfile group "$groupFile" \
     --arg envName "$(jq -r '.env // ""' "$req")" -f "$LIB_DIR/resolve.jq") \
     || fail "failed to resolve group request"
   jq -e '.ok == true' <<<"$resolveOut" >/dev/null || fail "$(jq -r '.error' <<<"$resolveOut")"
-  jq -c --argjson orig "$(<"$req")" \
-    '{method, url, headers, body, timeoutSec: ($orig.timeoutSec // 30)}' <<<"$resolveOut" >"$effFile"
+  # Only timeoutSec (a plain number) is needed from the original request here,
+  # so extract just that instead of putting the whole request back on argv.
+  origTimeoutSec=$(jq -r '(.timeoutSec // 30) | if (type == "number" and . > 0) then . else 30 end' "$req")
+  jq -c --argjson timeoutSec "$origTimeoutSec" \
+    '{method, url, headers, body, timeoutSec: $timeoutSec}' <<<"$resolveOut" >"$effFile"
   resolvedJson=$(jq -c '.resolved' <<<"$resolveOut")
   req=$effFile
 fi
