@@ -36,6 +36,21 @@ slugify() {
   printf '%s' "${s:-group}"
 }
 
+# A slug names one file directly inside $DIR, so it has to be a plain file
+# name. Without this check `export`/`delete` resolve "$DIR/$slug.json" wherever
+# the caller points them: `export ../../../secrets` prints any .json file the
+# user can read (bearer tokens and passwords included) and `delete` removes it.
+# The panel only ever passes a basename it got back from `list`, but these
+# scripts are a documented command-line interface of their own.
+#
+# Checking for a path separator rather than matching slugify()'s [a-z0-9-]
+# alphabet on the way back in: that is all confinement to $DIR needs, and a
+# group file copied in by hand (`Staging_API.json`) still lists, exports and
+# deletes the way it does today.
+validSlug() {
+  [[ -n $1 && $1 != */* && $1 != "." && $1 != ".." ]]
+}
+
 # Prints an unused "$DIR/<slug>.json" path (base name deduped with -2, -3, ...).
 freeSlug() {
   local base=$1 slug=$1 n=2
@@ -96,8 +111,9 @@ case ${1:-} in
     ;;
   export)
     slug=${2:-}
+    validSlug "$slug" || die "invalid group slug: $slug"
     path="$DIR/$slug.json"
-    [[ -n $slug && -f $path ]] || die "unknown group: $slug"
+    [[ -f $path ]] || die "unknown group: $slug"
     jq -e 'type == "object"' "$path" >/dev/null 2>&1 || die "invalid group file: $path"
     # $group goes in via --slurpfile for the same reason as import above:
     # the group can carry a bearer token, API key, or basic-auth password.
@@ -105,8 +121,9 @@ case ${1:-} in
     ;;
   delete)
     slug=${2:-}
+    validSlug "$slug" || die "invalid group slug: $slug"
     path="$DIR/$slug.json"
-    [[ -n $slug && -f $path ]] || die "unknown group: $slug"
+    [[ -f $path ]] || die "unknown group: $slug"
     rm -f "$path" || die "cannot delete $path"
     jq -nc --arg slug "$slug" --arg path "$path" '{slug:$slug, path:$path, deleted:true}'
     ;;

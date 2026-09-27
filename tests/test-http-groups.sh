@@ -198,6 +198,38 @@ importMode=$(stat -c '%a' "$permtmp/groups/perms-import.json")
 rm -rf "$permtmp"
 export OMARCHY_HTTP_GROUPS_DIR="$tmp/groups"
 
+# ------------------------------------------------ slug confinement (export/delete)
+# export/delete resolve "$DIR/$slug.json". A slug that escapes $DIR would let
+# export print any .json file the user can read and delete remove it.
+travtmp=$(mktemp -d)
+export OMARCHY_HTTP_GROUPS_DIR="$travtmp/groups"
+mkdir -p "$travtmp/groups" "$travtmp/outside"
+printf '{"name":"loot","auth":{"type":"bearer","token":"OUTSIDE-TOKEN"}}\n' >"$travtmp/outside/loot.json"
+printf '{"name":"Hand Placed"}\n' >"$travtmp/groups/Staging_API.json"
+
+for bad in "../outside/loot" "../../etc/hosts" "/etc/hosts" "a/b" "." ".." ""; do
+  "$BIN" export "$bad" >"$travtmp/o.json" 2>/dev/null; rc=$?
+  [[ $rc -ne 0 ]] && jq -e '.error | contains("invalid group slug") or contains("unknown group")' "$travtmp/o.json" >/dev/null \
+    && pass "export refuses the slug '$bad'" || fail "export slug '$bad' (rc=$rc): $(cat "$travtmp/o.json")"
+  "$BIN" delete "$bad" >"$travtmp/o.json" 2>/dev/null; rc=$?
+  [[ $rc -ne 0 ]] && jq -e '.error | contains("invalid group slug") or contains("unknown group")' "$travtmp/o.json" >/dev/null \
+    && pass "delete refuses the slug '$bad'" || fail "delete slug '$bad' (rc=$rc): $(cat "$travtmp/o.json")"
+done
+
+[[ -f $travtmp/outside/loot.json ]] \
+  && pass "a file outside the groups dir is neither exported nor deleted" \
+  || fail "delete escaped the groups dir and removed $travtmp/outside/loot.json"
+
+# Confinement must not mean "only slugs slugify() would have produced": a group
+# file copied in by hand still has to work.
+out=$("$BIN" export "Staging_API")
+printf '%s' "$out" | jq -e '.info.name == "Hand Placed"' >/dev/null \
+  && pass "a hand-placed group file still exports by its own basename" || fail "hand-placed export: $out"
+out=$("$BIN" delete "Staging_API")
+printf '%s' "$out" | jq -e '.deleted == true' >/dev/null \
+  && pass "a hand-placed group file still deletes by its own basename" || fail "hand-placed delete: $out"
+rm -rf "$travtmp"
+
 # ------------------------------------------------ list repairs pre-existing modes
 # `new`/`import` create 0700/0600, but a group directory or file written by an
 # earlier version stays 0755/0644 with saved API keys and passwords in it.
