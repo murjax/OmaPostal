@@ -58,11 +58,12 @@ case ${1:-} in
     name=${2:-}
     [[ -n ${name//[[:space:]]/} ]] || die "group name required"
     mkdir -p "$DIR" || die "cannot create $DIR"
+    chmod 700 "$DIR" 2>/dev/null
     slug=$(freeSlug "$(slugify "$name")")
     path="$DIR/$slug.json"
-    jq -n --arg name "$name" \
+    (umask 077; jq -n --arg name "$name" \
       '{name:$name, baseUrl:"", headers:{}, auth:{type:"none"}, environments:{}, activeEnv:"", requests:[]}' \
-      >"$path" || die "cannot write $path"
+      >"$path") || die "cannot write $path"
     jq -nc --arg slug "$slug" --arg path "$path" --arg name "$name" '{slug:$slug, path:$path, name:$name}'
     ;;
   import)
@@ -74,9 +75,10 @@ case ${1:-} in
     out=$(jq -nc --argjson collection "$(<"$file")" --arg overrideName "$overrideName" \
       -f "$LIB_DIR/postman-import.jq") || die "failed to convert collection: $file"
     mkdir -p "$DIR" || die "cannot create $DIR"
+    chmod 700 "$DIR" 2>/dev/null
     slug=$(freeSlug "$(slugify "$(jq -r '.group.name' <<<"$out")")")
     path="$DIR/$slug.json"
-    jq '.group' <<<"$out" >"$path" || die "cannot write $path"
+    (umask 077; jq '.group' <<<"$out" >"$path") || die "cannot write $path"
     jq -c --arg slug "$slug" --arg path "$path" \
       '{slug:$slug, path:$path, name:.group.name, requestCount:.requestCount, warnings:.warnings}' <<<"$out"
     ;;

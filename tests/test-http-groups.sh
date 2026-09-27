@@ -136,4 +136,27 @@ printf '%s' "$out" | jq -e --arg path "$path" '.slug == "jsonplaceholder-api" an
 [[ $rc -ne 0 ]] && jq -e '.error | length > 0' "$tmp/o.json" >/dev/null \
   && pass "delete: empty slug -> error JSON and non-zero exit" || fail "delete empty (rc=$rc): $(cat "$tmp/o.json")"
 
+# ------------------------------------------------ file/dir permissions under a permissive umask
+# Group files can hold saved API keys/passwords; under a normal 022 umask
+# they must not become group/world readable.
+permtmp=$(mktemp -d)
+export OMARCHY_HTTP_GROUPS_DIR="$permtmp/groups"
+(
+  umask 022
+  "$BIN" new "Perms" >/dev/null
+  cp "$FIXTURE" "$permtmp/perms-import.json"
+  "$BIN" import "$permtmp/perms-import.json" "Perms Import" >/dev/null
+)
+dirMode=$(stat -c '%a' "$permtmp/groups")
+[[ $dirMode == "700" ]] && pass "new: group dir is created 700 regardless of umask" \
+  || fail "group dir mode: $dirMode"
+newMode=$(stat -c '%a' "$permtmp/groups/perms.json")
+[[ $newMode == "600" ]] && pass "new: group file is created 600 regardless of umask" \
+  || fail "new file mode: $newMode"
+importMode=$(stat -c '%a' "$permtmp/groups/perms-import.json")
+[[ $importMode == "600" ]] && pass "import: group file is created 600 regardless of umask" \
+  || fail "import file mode: $importMode"
+rm -rf "$permtmp"
+export OMARCHY_HTTP_GROUPS_DIR="$tmp/groups"
+
 exit $((fails > 0 ? 1 : 0))
