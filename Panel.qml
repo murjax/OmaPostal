@@ -302,8 +302,6 @@ Panel {
     }
   }
 
-  Process { id: exportCopyProc }
-
   Process {
     id: groupsExportProc
     stdout: StdioCollector { id: groupsExportOut; waitForEnd: true }
@@ -314,8 +312,10 @@ Panel {
         root.setImportMessage(root.procError(made, "export failed"), true)
         return
       }
-      exportCopyProc.command = ["wl-copy", "--trim-newline", text]
-      exportCopyProc.running = true
+      if (!root.copyText(text)) {
+        root.setImportMessage("another copy is still in progress — try again", true)
+        return
+      }
       root.setImportMessage("Copied Postman collection to clipboard", false)
     }
   }
@@ -541,7 +541,10 @@ Panel {
         root.setImportMessage(root.procError(parsed, String(curlErr.text || "").trim() || "failed to build curl command"), true)
         return
       }
-      root.copyText(parsed.curl)
+      if (!root.copyText(parsed.curl)) {
+        root.setImportMessage("another copy is still in progress — try again", true)
+        return
+      }
       root.setImportMessage("Copied curl command to clipboard", false)
     }
   }
@@ -655,12 +658,35 @@ Panel {
     onFileChanged: reload()
   }
 
-  Process { id: copyProc }
+  // wl-copy has to stay resident to serve the Wayland selection, so anything
+  // handed to it in argv sits in a world-readable /proc/<pid>/cmdline for as
+  // long as the clipboard holds that entry — minutes or hours, not the
+  // milliseconds a curl or jq run lasts. Everything this panel copies can
+  // carry a credential: the resolved curl command (an Authorization header,
+  // by design), a group export (bearer tokens, basic-auth passwords, apiKey
+  // values), or a response body that contains an issued token. So the text
+  // goes in over stdin, which no other user can read. Dropping stdinEnabled
+  // is the EOF wl-copy waits for before it takes ownership of the selection
+  // and forks into the background.
+  Process {
+    id: copyProc
+    property string pending: ""
+    command: ["wl-copy", "--trim-newline"]
+    onStarted: {
+      copyProc.write(copyProc.pending)
+      copyProc.pending = ""
+      copyProc.stdinEnabled = false
+    }
+  }
 
+  // Returns false when a previous copy is still in flight, so a caller reports
+  // that instead of claiming a copy that never happened.
   function copyText(text) {
-    if (copyProc.running) return
-    copyProc.command = ["wl-copy", "--trim-newline", text]
+    if (copyProc.running) return false
+    copyProc.pending = String(text)
+    copyProc.stdinEnabled = true
     copyProc.running = true
+    return true
   }
 
   // Panel's own manageIpc:true already registers open/close/show/hide/toggle
