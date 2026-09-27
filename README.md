@@ -121,7 +121,10 @@ omarchy plugin remove murjax.omapostal    # uninstall it entirely
 ## How it sends requests
 
 `Panel.qml` writes the request (method, URL, headers, body, timeout) as
-JSON to a runtime-dir temp file, then runs `bin/http-send` on it, which
+JSON to a scratch file in its own private directory (`$XDG_RUNTIME_DIR/
+murjax.omapostal`, or `~/.cache/omarchy/murjax.omapostal` when that is
+unset — mode `0700`, with the file itself `0600`), then runs
+`bin/http-send` on it, which
 shells out to `curl` and prints one JSON result line: status, status text,
 time in ms, size, response headers, and the response body (capped at 2MB,
 flagged `truncated` past that). Redirects are followed (`-L`, up to 10
@@ -222,23 +225,39 @@ request to start from), `path` (relative path, joined to `baseUrl`), and
 `auth`, along with the usual `method`, `headers`, `body`. Without
 `groupFile`, behavior is unchanged. The result gains
 `resolved` (`method`, `url`, `headers`, `body`) showing what was sent, with
-auth values masked as `••••`.
+credentials masked as `••••`. Masking is by name, not by where the value came
+from: any header, environment variable or query parameter whose *name* looks
+like a credential (`Authorization`, `Cookie`, `*token*`, `*secret*`,
+`*password*`, `*api[-_]key*`, …) is masked wherever it appears, including
+inside the request body when it was substituted from a `{{variable}}`.
 
 ## Security note
 
-Headers and body are stored **in plaintext**: transiently in the runtime
-temp file used to launch each request, and persistently in the history
-file at `~/.local/state/omarchy/murjax-http-history.json` (bounded by
-`historyLimit`). If you paste a bearer token or API key into a header
-while testing, it will sit in that history file until cleared. Use the
-**Clear history** button in the History tab to wipe it (after a
-confirmation prompt — no undo). History never
-stores auth values (bearer tokens, passwords, API keys), but it does store
-request headers you typed yourself.
+Headers and body are stored **in plaintext**: transiently in the scratch file
+used to launch each request (overwritten as soon as the request finishes), and
+persistently in the history file at
+`~/.local/state/omarchy/murjax-http-history.json` (bounded by `historyLimit`).
+If you paste a bearer token or API key into a header while testing, it will sit
+in that history file until cleared. Use the **Clear history** button in the
+History tab to wipe it (after a confirmation prompt — no undo).
+
+History does not store credentials that masking recognizes — anything under a
+credential-*named* header, variable or query parameter (see "How it sends
+requests" above). It does store, in the clear, a secret you put somewhere
+masking cannot recognize: a value under an innocuous header name, or one typed
+literally into a request body.
 
 Group files store tokens, passwords and API keys in **plaintext** (bar
 `historyLimit` does not apply to them). Keep that in mind before
 committing or sharing a group file.
+
+Every file the plugin writes is created `0600` inside a `0700` directory (group
+files, the history file and the request scratch files), so no other local user
+can read them at rest — group directories and files created by an earlier
+version are repaired in place the next time the panel opens. Nothing the plugin
+copies to the clipboard is passed on a command line, since `wl-copy` stays
+resident to serve the selection and its arguments would be readable from
+`/proc` for as long as the clipboard held them.
 
 ## Scripts
 
@@ -250,6 +269,7 @@ bin/http-groups import <file> [name]    # convert a Postman v2.x collection into
                                          # print {"slug","path","name","requestCount","warnings":[...]}
 bin/http-groups export <slug>           # print the group as a Postman v2.1 collection (stdout)
 bin/http-groups delete <slug>           # delete the group file, print {"slug","path","deleted":true}
+bin/http-secure init <dir> [file ...]   # create/repair the plugin's private dir (0700) and files (0600)
 ```
 
 `<request-file>`: `{"method":"GET","url":"...","headers":{...},"body":"...","timeoutSec":30}`
@@ -271,6 +291,13 @@ including Postman import/export against a real fixture collection
 (`tests/fixtures/JSONPlaceholder.postman_collection.json`); and unit tests
 for the JS libraries (history de-duplication, group helpers), which need
 `node` and are skipped if it is absent.
+
+Security-specific regression tests: that no secret reaches the command line of
+`curl` or of any `jq` invocation; that credentials are masked in `resolved`
+wherever they came from, while the real values still reach the server; that
+group directories/files and the history file end up `0600`/`0700` under a
+permissive umask and are repaired if they were not; and that `export`/`delete`
+cannot be pointed outside the groups directory.
 
 ## Limitations
 
