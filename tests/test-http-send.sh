@@ -292,9 +292,9 @@ printf '%s' "$(<"$tmp/queryargv.out")" | jq -e '.ok == true and .status == 200' 
 
 # ---- resolved (unmasked body / unauthenticated headers) is not exposed to --
 # ---- the final output-building jq's own argv either -------------------------
-# .resolved always carries the real, unmasked request body (and, for an
-# unauthenticated group, unmasked headers too — only auth-derived values get
-# masked), so it must not sit on that jq process's argv even though it's
+# .resolved is masked by name (see the masking section below), so a header or
+# body value that is *not* credential-named still reaches it verbatim — as
+# these two do. It must not sit on that jq process's argv even though it is
 # meant to reach the UI/history file.
 secretBody="s3cr3t-resolved-body-$$-$RANDOM"
 secretHeader="s3cr3t-resolved-header-$$-$RANDOM"
@@ -320,6 +320,48 @@ req '{"method":"POST","url":"http://127.0.0.1:'"$port"'/echo","headers":{"X-Cust
 out=$("$BIN" "$tmp/req.json")
 printf '%s' "$out" | jq -e '(.body | fromjson).headers["X-Custom"] == "a\\b\"c" and (.body | fromjson).body == "one\\two"' >/dev/null \
   && pass "header/body backslash reaches the server unescaped-once" || fail "backslash: $out"
+
+# ---- resolved masks credentials by name, wherever they came from --------------
+# Masking used to key off provenance: only the value apply_auth injected was
+# masked, so a group with auth.type "none" leaked every credential it carried
+# into .resolved — and .resolved is what the history file stores. These cover
+# the shapes an imported Postman collection actually produces.
+
+maskG="$tmp/group-mask.json"
+cat >"$maskG" <<EOF
+{"name":"M","baseUrl":"http://127.0.0.1:$port",
+ "headers":{"X-Trace":"trace-ok","Authorization":"Bearer {{accessToken}}"},
+ "auth":{"type":"none"},
+ "environments":{"dev":{"accessToken":"REAL-ACCESS-TOKEN","refreshToken":"REAL-REFRESH-TOKEN","userName":"alice"}},
+ "activeEnv":"dev",
+ "requests":[{"name":"R","method":"POST","path":"/echo?token={{accessToken}}&page=2",
+              "headers":{"X-Api-Key":"LITERAL-APIKEY","Cookie":"sid=abc","X-User":"{{userName}}"},
+              "body":"{\"refreshToken\":\"{{refreshToken}}\",\"user\":\"{{userName}}\"}",
+              "auth":"inherit"}]}
+EOF
+req "{\"groupFile\":\"$maskG\",\"requestName\":\"R\"}"
+out=$("$BIN" "$tmp/req.json")
+
+check '.ok == true and .status == 200' "masking: group request still succeeds"
+
+# What actually went out must be the real credential, not the placeholder.
+check '(.body|fromjson).headers["Authorization"] == "Bearer REAL-ACCESS-TOKEN"'   "masking: the real token is still sent in the header"
+check '(.body|fromjson).path == "/echo?token=REAL-ACCESS-TOKEN&page=2"'   "masking: the real token is still sent in the query string"
+check '(.body|fromjson).body == "{\"refreshToken\":\"REAL-REFRESH-TOKEN\",\"user\":\"alice\"}"'   "masking: the real token is still sent in the body"
+
+# What is reported back for the UI and the history file must not be.
+check '.resolved.headers.Authorization == "••••"'   "masking: a var-substituted Authorization header is masked even with auth.type none"
+check '.resolved.headers["X-Api-Key"] == "••••"'   "masking: a credential-named header with a literal value is masked"
+check '.resolved.headers.Cookie == "••••"' "masking: Cookie is masked"
+check ".resolved.url == \"http://127.0.0.1:$port/echo?token=••••&page=2\"" \
+  "masking: a token in the query string is masked, other params are left alone"
+check '.resolved.body == "{\"refreshToken\":\"••••\",\"user\":\"alice\"}"'   "masking: a credential-named variable is masked inside the request body"
+
+# Non-credential values must survive, or the snapshot stops being useful.
+check '.resolved.headers["X-Trace"] == "trace-ok" and .resolved.headers["X-User"] == "alice"'   "masking: non-credential headers and variables are not masked"
+
+# The whole point: nothing that reaches the history file contains the secret.
+check '(.resolved | tojson) | (contains("REAL-ACCESS-TOKEN") or contains("REAL-REFRESH-TOKEN") or contains("LITERAL-APIKEY")) | not'   "masking: no credential appears anywhere in resolved"
 
 # ---- the panel adds a changing "nonce" field; it must be ignored ---------------
 
