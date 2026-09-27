@@ -38,14 +38,15 @@ effFile=$(mktemp)
 metaFile=$(mktemp)
 curlConfigFile=$(mktemp)
 requestBodyFile=$(mktemp)
+resolvedFile=$(mktemp)
+printf 'null' >"$resolvedFile"
 curlPid=""
-trap 'rm -f "$headerFile" "$bodyFile" "$bodyTruncFile" "$stderrFile" "$effFile" "$metaFile" "$curlConfigFile" "$requestBodyFile"' EXIT
+trap 'rm -f "$headerFile" "$bodyFile" "$bodyTruncFile" "$stderrFile" "$effFile" "$metaFile" "$curlConfigFile" "$requestBodyFile" "$resolvedFile"' EXIT
 # Cancelling (TERM/INT) must take curl down too, or it would keep running until
 # its own timeout. `wait` below is interrupted by the trap, which then exits.
 trap '[[ -n $curlPid ]] && kill "$curlPid" 2>/dev/null; exit 143' TERM INT
 
 # Group mode: resolve into a plain request file, then carry on as usual.
-resolvedJson=""
 groupFile=$(jq -r '.groupFile // ""' "$req")
 if [[ -n $groupFile ]]; then
   [[ -f $groupFile ]] || fail "group file not found: $groupFile"
@@ -65,7 +66,7 @@ if [[ -n $groupFile ]]; then
   origTimeoutSec=$(jq -r '(.timeoutSec // 30) | if (type == "number" and . > 0) then . else 30 end' "$req")
   jq -c --argjson timeoutSec "$origTimeoutSec" \
     '{method, url, headers, body, timeoutSec: $timeoutSec}' <<<"$resolveOut" >"$effFile"
-  resolvedJson=$(jq -c '.resolved' <<<"$resolveOut")
+  jq -c '.resolved' <<<"$resolveOut" >"$resolvedFile"
   req=$effFile
 fi
 
@@ -97,7 +98,10 @@ if [[ -n $body ]]; then
   echo "data-binary = @$requestBodyFile" >>"$curlConfigFile"
 fi
 
-curl_args+=("$url")
+# The url itself can carry an apiKey auth value as a query parameter
+# (lib/resolve.jq's apply_auth), so it goes in the config file too instead of
+# curl_args — same argv-exposure reasoning as headers/body above.
+jq -rn --arg u "$url" '"url = " + ($u | tojson)' >>"$curlConfigFile"
 
 curl "${curl_args[@]}" >"$metaFile" 2>"$stderrFile" &
 curlPid=$!
@@ -146,6 +150,10 @@ headersJson=$(tail -n +2 <<<"$lastBlock" | awk -F': ' '
   | group_by(.[0]) | map({key: .[0][0], value: (map(.[1]) | join(", "))}) | from_entries
 ')
 
+# $resolved comes in via --slurpfile (not --argjson "$resolvedJson"): group
+# mode's .resolved carries the actual request body unmasked (and, for
+# unauthenticated groups, unmasked headers too — only auth-derived values get
+# masked), so it must not sit on this jq process's own argv either.
 jq -n \
   --argjson status "${status:-0}" \
   --arg statusText "$statusText" \
@@ -154,7 +162,7 @@ jq -n \
   --argjson headers "$headersJson" \
   --rawfile body "$bodyTruncFile" \
   --argjson truncated "$truncated" \
-  --argjson resolved "${resolvedJson:-null}" \
+  --slurpfile resolved "$resolvedFile" \
   '{ok:true,status:$status,statusText:$statusText,timeMs:$timeMs,sizeBytes:$sizeBytes,
     headers:$headers,body:$body,truncated:$truncated,error:""}
-   + (if $resolved == null then {} else {resolved:$resolved} end)'
+   + (if $resolved[0] == null then {} else {resolved:$resolved[0]} end)'

@@ -267,6 +267,53 @@ fi
 printf '%s' "$(<"$tmp/xtrace.out")" | jq -e '.ok == true and .status == 200' >/dev/null \
   && pass "group request with hidden-argv secret still succeeds" || fail "hidden-argv group request: $(<"$tmp/xtrace.out")"
 
+# ---- an apiKey-in-query auth value is not exposed via curl's argv either ----
+# lib/resolve.jq's apiKey/query auth appends the key as part of the resolved
+# URL, and that URL used to be appended straight to curl_args — visible via
+# `ps`/`/proc/<pid>/cmdline` just like the header/body case above.
+secretQ="s3cr3t-query-$$-$RANDOM"
+groupQueryFile="$tmp/group-query-secret.json"
+cat >"$groupQueryFile" <<EOF
+{"name":"Q","baseUrl":"http://127.0.0.1:$port","auth":{"type":"apiKey","name":"key","value":"$secretQ","in":"query"}}
+EOF
+req "{\"groupFile\":\"$groupQueryFile\",\"path\":\"/sleep/2\"}"
+"$BIN" "$tmp/req.json" >"$tmp/queryargv.out" &
+queryargvpid=$!
+sleep 0.5
+curlpid=$(pgrep -f "curl.*127\.0\.0\.1:$port/sleep/2" | head -1)
+if [[ -n $curlpid ]] && tr '\0' '\n' <"/proc/$curlpid/cmdline" 2>/dev/null | grep -F -- "$secretQ" >/dev/null; then
+  fail "curl argv does not expose an apiKey-in-query auth value"
+else
+  pass "curl argv does not expose an apiKey-in-query auth value"
+fi
+wait "$queryargvpid"
+printf '%s' "$(<"$tmp/queryargv.out")" | jq -e '.ok == true and .status == 200' >/dev/null \
+  && pass "request with hidden-argv query secret still succeeds" || fail "hidden-argv query request: $(<"$tmp/queryargv.out")"
+
+# ---- resolved (unmasked body / unauthenticated headers) is not exposed to --
+# ---- the final output-building jq's own argv either -------------------------
+# .resolved always carries the real, unmasked request body (and, for an
+# unauthenticated group, unmasked headers too — only auth-derived values get
+# masked), so it must not sit on that jq process's argv even though it's
+# meant to reach the UI/history file.
+secretBody="s3cr3t-resolved-body-$$-$RANDOM"
+secretHeader="s3cr3t-resolved-header-$$-$RANDOM"
+groupUnauthFile="$tmp/group-unauth.json"
+cat >"$groupUnauthFile" <<EOF
+{"name":"U","baseUrl":"http://127.0.0.1:$port","auth":{"type":"none"}}
+EOF
+req "{\"groupFile\":\"$groupUnauthFile\",\"path\":\"/echo\",\"body\":\"$secretBody\",\"headers\":{\"X-Plain\":\"$secretHeader\"}}"
+bash -x "$BIN" "$tmp/req.json" >"$tmp/resolved-xtrace.out" 2>"$tmp/resolved-xtrace.err"
+if grep -E '^[+]+ jq ' "$tmp/resolved-xtrace.err" | grep -F -e "$secretBody" -e "$secretHeader" >/dev/null; then
+  fail "final output jq invocation does not expose unmasked resolved data via argv"
+else
+  pass "final output jq invocation does not expose unmasked resolved data via argv"
+fi
+printf '%s' "$(<"$tmp/resolved-xtrace.out")" | jq -e \
+  '.ok == true and .resolved.body == "'"$secretBody"'" and .resolved.headers["X-Plain"] == "'"$secretHeader"'"' >/dev/null \
+  && pass "resolved output still carries the unmasked body/header for the UI" \
+  || fail "hidden-argv resolved request: $(<"$tmp/resolved-xtrace.out")"
+
 # A backslash in a header value or body must reach the server unchanged, not
 # doubled — regression test for jq's @tsv escaping a lone backslash to `\\`.
 req '{"method":"POST","url":"http://127.0.0.1:'"$port"'/echo","headers":{"X-Custom":"a\\b\"c"},"body":"one\\two"}'
