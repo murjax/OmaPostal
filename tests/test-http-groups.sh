@@ -198,4 +198,25 @@ importMode=$(stat -c '%a' "$permtmp/groups/perms-import.json")
 rm -rf "$permtmp"
 export OMARCHY_HTTP_GROUPS_DIR="$tmp/groups"
 
+# ------------------------------------------------ list repairs pre-existing modes
+# `new`/`import` create 0700/0600, but a group directory or file written by an
+# earlier version stays 0755/0644 with saved API keys and passwords in it.
+# `list` is what the panel runs on every open, so it is what repairs them.
+repairtmp=$(mktemp -d)
+export OMARCHY_HTTP_GROUPS_DIR="$repairtmp/groups"
+mkdir -p "$repairtmp/groups"
+chmod 755 "$repairtmp/groups"
+printf '{"name":"Legacy","auth":{"type":"bearer","token":"LEGACY-TOKEN"}}\n' >"$repairtmp/groups/legacy.json"
+chmod 644 "$repairtmp/groups/legacy.json"
+
+out=$("$BIN" list)
+printf '%s' "$out" | jq -e 'length == 1 and .[0].slug == "legacy" and .[0].name == "Legacy"' >/dev/null \
+  && pass "list still reports a group it had to repair" || fail "list after repair: $out"
+dirMode=$(stat -c '%a' "$repairtmp/groups")
+[[ $dirMode == "700" ]] && pass "list repairs a 755 group dir to 700" || fail "repaired dir mode: $dirMode"
+fileMode=$(stat -c '%a' "$repairtmp/groups/legacy.json")
+[[ $fileMode == "600" ]] && pass "list repairs a 644 group file to 600" || fail "repaired file mode: $fileMode"
+rm -rf "$repairtmp"
+export OMARCHY_HTTP_GROUPS_DIR="$tmp/groups"
+
 exit $((fails > 0 ? 1 : 0))

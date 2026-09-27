@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# omarchy:summary=Create or repair the private directory and files this plugin writes (dir 0700, files 0600).
+# omarchy:args=init <private-dir> [file ...]
+#
+#   init <private-dir> [file ...]   mkdir -p <private-dir> and chmod it 0700;
+#                                   then, for each [file], create it 0600 if it
+#                                   is missing and chmod it 0600 if it exists.
+#                                   Output (stdout, one JSON line):
+#                                   {"ok":bool,"dir":"...","files":[...],"error":"..."}
+#
+# A [file]'s own parent directory is created if needed but its mode is left
+# alone: the history file lives in ~/.local/state/omarchy, which is shared with
+# other Omarchy modules, so this must not narrow it to 0700.
+#
+# Why this exists: the panel writes these files through Quickshell's FileView,
+# which creates a new file with 0666 & ~umask (0644 under the usual 022) and
+# offers no mode option — that is how the request history, which holds request
+# headers and bodies in plaintext, became world-readable. FileView does
+# preserve the mode of a file that already exists, so creating (or repairing)
+# the file here first makes every later write 0600. Idempotent: safe to run on
+# every panel open, and it converges even if a write beat it to the file.
+set -uo pipefail
+
+die() {
+  jq -nc --arg err "$1" '{ok:false,dir:"",files:[],error:$err}'
+  exit 1
+}
+
+secureFile() {
+  local f=$1 parent
+  parent=$(dirname "$f")
+  mkdir -p "$parent" || return 1
+  # umask 077 inside the subshell so the file is 0600 from creation rather than
+  # existing as 0644 for the moment before the chmod below.
+  [[ -e $f ]] || (umask 077; : >"$f") || return 1
+  chmod 600 "$f" || return 1
+}
+
+case ${1:-} in
+  init)
+    dir=${2:-}
+    [[ -n $dir ]] || die "usage: http-secure init <private-dir> [file ...]"
+    mkdir -p "$dir" || die "cannot create $dir"
+    chmod 700 "$dir" || die "cannot chmod 700 $dir"
+    shift 2
+    for f in "$@"; do
+      [[ -n $f ]] || continue
+      secureFile "$f" || die "cannot secure $f"
+    done
+    jq -nc --arg dir "$dir" --args '{ok:true, dir:$dir, files:$ARGS.positional, error:""}' "$@"
+    ;;
+  *)
+    die "usage: http-secure init <private-dir> [file ...]"
+    ;;
+esac

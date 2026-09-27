@@ -49,6 +49,14 @@ freeSlug() {
 case ${1:-} in
   list)
     shopt -s nullglob
+    # `new`/`import` set 0700/0600 at creation time, but a group directory or
+    # file written by an earlier version stays 0755/0644 — exposing saved API
+    # keys and passwords to other local users — until something repairs it.
+    # `list` is the one command the panel runs on every open, so it is where
+    # that repair belongs; failures are ignored on purpose, since a group file
+    # owned by someone else must still be listed.
+    [[ -d $DIR ]] && chmod 700 "$DIR" 2>/dev/null
+    for f in "$DIR"/*.json; do chmod 600 "$f" 2>/dev/null; done
     for f in "$DIR"/*.json; do
       jq -c --arg path "$f" --arg slug "$(basename "$f" .json)" \
         'select(type == "object") | {slug:$slug, path:$path, name:(.name // $slug)}' "$f" 2>/dev/null

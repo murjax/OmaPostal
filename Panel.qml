@@ -26,13 +26,15 @@ Panel {
 
   readonly property string scriptDir: Qt.resolvedUrl(".").toString().replace("file://", "") + "/bin"
   readonly property string historyPath: Quickshell.env("HOME") + "/.local/state/omarchy/murjax-http-history.json"
-  // XDG_RUNTIME_DIR is per-user and mode 0700; never fall back to the shared,
-  // world-writable /tmp for files that can carry a request's Authorization
-  // header or other auth in plain text. Falling back under $HOME keeps the
-  // same "nobody else can read or symlink-race this" guarantee.
-  readonly property string scratchDir: Quickshell.env("XDG_RUNTIME_DIR") || (Quickshell.env("HOME") + "/.cache/omarchy/murjax.omapostal")
-  readonly property string requestPath: root.scratchDir + "/murjax-http-request.json"
-  readonly property string curlRequestPath: root.scratchDir + "/murjax-http-curl-request.json"
+  // Never fall back to the shared, world-writable /tmp for files that can carry
+  // a request's Authorization header or other auth in plain text. XDG_RUNTIME_DIR
+  // is per-user and mode 0700; the $HOME fallback is not, so this is always a
+  // subdirectory the plugin owns and http-secure can chmod 0700 — the earlier
+  // fallback was both unhardened and never created at all, so a session without
+  // XDG_RUNTIME_DIR could not send a request.
+  readonly property string scratchDir: (Quickshell.env("XDG_RUNTIME_DIR") || (Quickshell.env("HOME") + "/.cache/omarchy")) + "/murjax.omapostal"
+  readonly property string requestPath: root.scratchDir + "/request.json"
+  readonly property string curlRequestPath: root.scratchDir + "/curl-request.json"
 
   readonly property int timeoutSec: Math.max(5, parseInt(setting("timeoutSec", 30), 10) || 30)
   readonly property int historyLimit: Math.max(1, parseInt(setting("historyLimit", 20), 10) || 20)
@@ -234,8 +236,44 @@ Panel {
   onGroupsChanged: groupDropdown.value = root.groupLabel()
   onEnvNameChanged: envDropdown.value = root.envName
   onOpenedChanged: {
-    if (root.opened) root.refreshGroups()
+    if (root.opened) { root.secureFiles(); root.refreshGroups() }
     else root.closeConfirm()
+  }
+
+  // FileView creates a new file with 0666 & ~umask — 0644 under the usual 022 —
+  // and has no mode option, which is how the history file (request headers and
+  // bodies in plaintext) ended up world-readable. It does preserve the mode of
+  // a file that already exists, so http-secure creates/repairs these as 0600
+  // and the scratch directory as 0700 before anything is written to them.
+  // Idempotent, so running it on every open also repairs files written before
+  // this fix, and nothing here can send a request without opening the panel.
+  // Failure here is not cosmetic — it means the history file may still be
+  // world-readable — so it is reported rather than swallowed, unlike the
+  // printErrors:false FileViews below.
+  Process {
+    id: secureProc
+    command: [root.scriptDir + "/http-secure", "init", root.scratchDir,
+      root.requestPath, root.curlRequestPath, root.historyPath]
+    stdout: StdioCollector { id: secureOut; waitForEnd: true }
+    onExited: function (code) {
+      if (code === 0) return
+      var parsed = Json.tryParse(String(secureOut.text || "").trim(), null)
+      root.setImportMessage(root.procError(parsed, "could not restrict permissions on the plugin's private files"), true)
+    }
+  }
+
+  function secureFiles() {
+    if (!secureProc.running) secureProc.running = true
+  }
+
+  // The scratch files hold the request's own Authorization header, API key and
+  // body in plaintext. Overwrite them once the run that needed them is done, so
+  // the last request's credentials do not sit at rest until logout. Overwriting
+  // rather than unlinking keeps the 0600 mode http-secure gave the file, which
+  // FileView preserves but cannot set itself.
+  function scrubScratch(view) {
+    view.scrubbing = true
+    view.setText("{}\n")
   }
 
   FileView {
@@ -445,6 +483,8 @@ Panel {
     root.response = { ok: false, cancelled: true, status: 0, statusText: "", timeMs: 0, sizeBytes: 0,
       headers: {}, body: "", truncated: false, error: message }
     if (sendProc.running) sendProc.running = false
+    // If it never started there is no onExited to scrub from.
+    else root.scrubScratch(requestFile)
   }
 
   // A cancelled run may still be exiting when the next send is ready to start;
@@ -484,10 +524,15 @@ Panel {
     id: requestFile
     path: root.requestPath
     printErrors: false
+    // Set while scrubScratch's own write is in flight, so the write that wipes
+    // the file is not mistaken for a request payload becoming ready to send.
+    property bool scrubbing: false
     onSaved: {
+      if (requestFile.scrubbing) { requestFile.scrubbing = false; return }
       if (root.sending) root.startSend()
     }
     onSaveFailed: {
+      if (requestFile.scrubbing) { requestFile.scrubbing = false; return }
       root.sending = false
       root.response = { ok: false, status: 0, statusText: "", timeMs: 0, sizeBytes: 0,
         headers: {}, body: "", truncated: false, error: "failed to write request file" }
@@ -506,7 +551,12 @@ Panel {
         if (root.sending) Qt.callLater(root.startSend)
         return
       }
-      if (sendProc.seq !== root.sendSeq || !root.sending) return   // cancelled or superseded
+      // Cancelled or superseded. Only scrub when nothing is queued: a
+      // superseded run means send() has already written the next payload.
+      if (sendProc.seq !== root.sendSeq || !root.sending) {
+        if (!root.sending) root.scrubScratch(requestFile)
+        return
+      }
       root.sending = false
       var parsed = Json.tryParse(String(sendOut.text || "").trim(), null)
       if (!parsed) {
@@ -516,6 +566,7 @@ Panel {
       root.response = parsed
       root.addHistoryEntry(root.pendingRequest, parsed)
       root.pendingRequest = null
+      root.scrubScratch(requestFile)
     }
   }
 
@@ -523,8 +574,13 @@ Panel {
     id: curlRequestFile
     path: root.curlRequestPath
     printErrors: false
-    onSaved: curlProc.running = true
+    property bool scrubbing: false
+    onSaved: {
+      if (curlRequestFile.scrubbing) { curlRequestFile.scrubbing = false; return }
+      curlProc.running = true
+    }
     onSaveFailed: {
+      if (curlRequestFile.scrubbing) { curlRequestFile.scrubbing = false; return }
       root.curlCopying = false
       root.setImportMessage("failed to write curl request file", true)
     }
@@ -536,6 +592,7 @@ Panel {
     stderr: StdioCollector { id: curlErr; waitForEnd: true }
     onExited: function (code) {
       root.curlCopying = false
+      root.scrubScratch(curlRequestFile)
       var parsed = Json.tryParse(String(curlOut.text || "").trim(), null)
       if (!parsed || !parsed.ok) {
         root.setImportMessage(root.procError(parsed, String(curlErr.text || "").trim() || "failed to build curl command"), true)
