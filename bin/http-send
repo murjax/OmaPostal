@@ -36,8 +36,10 @@ bodyTruncFile=$(mktemp)
 stderrFile=$(mktemp)
 effFile=$(mktemp)
 metaFile=$(mktemp)
+curlConfigFile=$(mktemp)
+requestBodyFile=$(mktemp)
 curlPid=""
-trap 'rm -f "$headerFile" "$bodyFile" "$bodyTruncFile" "$stderrFile" "$effFile" "$metaFile"' EXIT
+trap 'rm -f "$headerFile" "$bodyFile" "$bodyTruncFile" "$stderrFile" "$effFile" "$metaFile" "$curlConfigFile" "$requestBodyFile"' EXIT
 # Cancelling (TERM/INT) must take curl down too, or it would keep running until
 # its own timeout. `wait` below is interrupted by the trap, which then exits.
 trap '[[ -n $curlPid ]] && kill "$curlPid" 2>/dev/null; exit 143' TERM INT
@@ -70,15 +72,20 @@ curl_args=(-sS -L --max-redirs 10 -X "$method"
   --max-time "$timeoutSec" --connect-timeout 10
   -D "$headerFile" -o "$bodyFile"
   --max-filesize "$MAX_BODY_BYTES"
-  -w '%{http_code}\t%{time_total}\n')
+  -w '%{http_code}\t%{time_total}\n'
+  -K "$curlConfigFile")
 
-while IFS=$'\t' read -r key value; do
-  [[ -n $key ]] || continue
-  curl_args+=(-H "$key: $value")
-done < <(jq -r '.headers // {} | to_entries[] | [.key, .value] | @tsv' "$req")
+# Headers and body can carry an Authorization value, password, or API key, so
+# they're passed through this curl config file (-K) instead of argv — argv is
+# readable by any local user via `ps`/`/proc/<pid>/cmdline` while curl runs.
+# Built in one jq pass (not via @tsv + a bash read loop) so values keep
+# whatever backslashes/quotes they contain instead of being escaped twice.
+jq -r '.headers // {} | to_entries[] | select(.key != "") |
+  "header = " + ((.key + ": " + .value) | tojson)' "$req" >"$curlConfigFile"
 
 if [[ -n $body ]]; then
-  curl_args+=(--data-binary "$body")
+  printf '%s' "$body" >"$requestBodyFile"
+  echo "data-binary = @$requestBodyFile" >>"$curlConfigFile"
 fi
 
 curl_args+=("$url")

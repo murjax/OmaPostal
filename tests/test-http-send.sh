@@ -226,6 +226,32 @@ else
   pass "curl child is killed on TERM"
 fi
 
+# ---- headers/body reach curl without exposing secrets on the process list ----
+
+secret="s3cr3t-token-$$-$RANDOM"
+req "{\"method\":\"GET\",\"url\":\"http://127.0.0.1:$port/sleep/2\",\"headers\":{\"Authorization\":\"Bearer $secret\"},\"timeoutSec\":10}"
+"$BIN" "$tmp/req.json" >"$tmp/argv.out" &
+argvpid=$!
+sleep 0.5
+# Only curl's own argv matters here; the surrounding test harness may echo
+# this script's source (secret literal included) into its own process line.
+curlpid=$(pgrep -f "curl.*127\.0\.0\.1:$port/sleep/2" | head -1)
+if [[ -n $curlpid ]] && tr '\0' '\n' <"/proc/$curlpid/cmdline" 2>/dev/null | grep -F -- "$secret" >/dev/null; then
+  fail "curl argv does not expose the Authorization header"
+else
+  pass "curl argv does not expose the Authorization header"
+fi
+wait "$argvpid"
+printf '%s' "$(<"$tmp/argv.out")" | jq -e '.ok == true and .status == 200' >/dev/null \
+  && pass "request with hidden-argv header still succeeds" || fail "hidden-argv request: $(<"$tmp/argv.out")"
+
+# A backslash in a header value or body must reach the server unchanged, not
+# doubled — regression test for jq's @tsv escaping a lone backslash to `\\`.
+req '{"method":"POST","url":"http://127.0.0.1:'"$port"'/echo","headers":{"X-Custom":"a\\b\"c"},"body":"one\\two"}'
+out=$("$BIN" "$tmp/req.json")
+printf '%s' "$out" | jq -e '(.body | fromjson).headers["X-Custom"] == "a\\b\"c" and (.body | fromjson).body == "one\\two"' >/dev/null \
+  && pass "header/body backslash reaches the server unescaped-once" || fail "backslash: $out"
+
 # ---- the panel adds a changing "nonce" field; it must be ignored ---------------
 
 req "{\"method\":\"GET\",\"url\":\"http://127.0.0.1:$port/echo\",\"nonce\":\"123-abc\"}"
