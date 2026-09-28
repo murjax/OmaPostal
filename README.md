@@ -260,8 +260,12 @@ carry a credential until it has finished: Quickshell's `FileView` has no
 file-mode option and would otherwise create a missing directory `0755` and a
 new file `0644`, exposing the request before the repair landed. A send issued
 in that window is deferred and then sent; if the repair fails outright the send
-is refused with the error rather than written unprotected. Nothing the plugin
-copies to the clipboard is passed on a command line, since `wl-copy` stays
+is refused with the error rather than written unprotected. None of these paths
+is ever legitimately a symlink, so a symlink at one is refused instead of
+followed — otherwise the mode change would land on the target and the request
+payload or history would be written there. A group file you symlinked in
+yourself keeps working; only the mode change is skipped for it. Nothing the
+plugin copies to the clipboard is passed on a command line, since `wl-copy` stays
 resident to serve the selection and its arguments would be readable from
 `/proc` for as long as the clipboard held them.
 
@@ -307,7 +311,9 @@ permissive umask and are repaired if they were not; that a send racing
 refused if securing fails (`tests/test-panel-secure.sh`, which runs the real
 gate and the real `FileView` under a headless `quickshell` and is skipped if
 `qs` is absent); and that `export`/`delete` cannot be pointed outside the
-groups directory.
+groups directory; and that a symlink at any path the plugin creates or repairs
+is refused rather than followed, with its target left untouched — including a
+dangling one, which an existence test alone does not see.
 
 ## Limitations
 

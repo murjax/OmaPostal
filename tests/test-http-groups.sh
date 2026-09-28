@@ -251,4 +251,45 @@ fileMode=$(stat -c '%a' "$repairtmp/groups/legacy.json")
 rm -rf "$repairtmp"
 export OMARCHY_HTTP_GROUPS_DIR="$tmp/groups"
 
+# ------------------------------------------------ symlinks are never followed
+# Same class as bin/http-secure: a group file holds bearer tokens, basic-auth
+# passwords and apiKey values, so neither creating one nor repairing its mode
+# may resolve a symlink standing at the path.
+symtmp=$(mktemp -d)
+export OMARCHY_HTTP_GROUPS_DIR="$symtmp/groups"
+mkdir -p "$symtmp/groups"
+
+# freeSlug must treat a dangling symlink as an occupied name; [[ -e ]] alone
+# reads false for one, and the redirect would then create its target.
+ln -s "$symtmp/never-created.json" "$symtmp/groups/taken.json"
+out=$("$BIN" new "Taken")
+printf '%s' "$out" | jq -e '.slug == "taken-2"' >/dev/null \
+  && pass "new steps over a name held by a dangling symlink" || fail "new past symlink: $out"
+[[ ! -e $symtmp/never-created.json ]] \
+  && pass "the dangling symlink's target is not created" \
+  || fail "new wrote through the symlink to $symtmp/never-created.json"
+
+# list repairs modes, but not through a symlink: that mode would land on the
+# target, which is not this plugin's file to change.
+echo "victim data" >"$symtmp/victim.json"
+chmod 644 "$symtmp/victim.json"
+ln -s "$symtmp/victim.json" "$symtmp/groups/linked.json"
+out=$("$BIN" list)
+[[ $(stat -c '%a' "$symtmp/victim.json") == "644" && $(cat "$symtmp/victim.json") == "victim data" ]] \
+  && pass "list leaves a symlink's target alone rather than chmodding it" \
+  || fail "victim.json is now $(stat -c '%a' "$symtmp/victim.json")"
+[[ $(stat -c '%a' "$symtmp/groups/taken-2.json") == "600" ]] \
+  && pass "list still repairs the real group files beside it" \
+  || fail "taken-2.json is $(stat -c '%a' "$symtmp/groups/taken-2.json")"
+
+# A symlinked group file someone put there on purpose still works: it is only
+# the mode change that is skipped, not the group itself.
+printf '{"name":"Linked"}\n' >"$symtmp/victim.json"
+out=$("$BIN" list)
+printf '%s' "$out" | jq -e 'map(.slug) | index("linked") != null' >/dev/null \
+  && pass "a deliberately symlinked group file is still listed" || fail "symlinked list: $out"
+
+rm -rf "$symtmp"
+export OMARCHY_HTTP_GROUPS_DIR="$tmp/groups"
+
 exit $((fails > 0 ? 1 : 0))

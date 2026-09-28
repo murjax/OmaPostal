@@ -54,7 +54,11 @@ validSlug() {
 # Prints an unused "$DIR/<slug>.json" path (base name deduped with -2, -3, ...).
 freeSlug() {
   local base=$1 slug=$1 n=2
-  while [[ -e $DIR/$slug.json ]]; do
+  # -L as well as -e: [[ -e ]] resolves the target, so it reads false for a
+  # dangling symlink, and the caller's redirection would then follow that link
+  # and write a group file — auth tokens and passwords included — to whatever
+  # it points at. A symlink counts as taken whether or not it resolves.
+  while [[ -e $DIR/$slug.json || -L $DIR/$slug.json ]]; do
     slug="$base-$n"
     n=$((n + 1))
   done
@@ -70,8 +74,12 @@ case ${1:-} in
     # `list` is the one command the panel runs on every open, so it is where
     # that repair belongs; failures are ignored on purpose, since a group file
     # owned by someone else must still be listed.
-    [[ -d $DIR ]] && chmod 700 "$DIR" 2>/dev/null
-    for f in "$DIR"/*.json; do chmod 600 "$f" 2>/dev/null; done
+    [[ -d $DIR ]] && [[ ! -L $DIR ]] && chmod 700 "$DIR" 2>/dev/null
+    # Skip a symlink rather than chmodding through it: the mode would land on
+    # whatever it points at, which is not this plugin's to change. It is still
+    # listed below — someone who deliberately symlinks a group file into their
+    # dotfiles should keep a working group.
+    for f in "$DIR"/*.json; do [[ -L $f ]] || chmod 600 "$f" 2>/dev/null; done
     for f in "$DIR"/*.json; do
       jq -c --arg path "$f" --arg slug "$(basename "$f" .json)" \
         'select(type == "object") | {slug:$slug, path:$path, name:(.name // $slug)}' "$f" 2>/dev/null
@@ -84,7 +92,10 @@ case ${1:-} in
     chmod 700 "$DIR" 2>/dev/null
     slug=$(freeSlug "$(slugify "$name")")
     path="$DIR/$slug.json"
-    (umask 077; jq -n --arg name "$name" \
+    # set -C makes this an O_CREAT|O_EXCL open: it fails on a symlink instead
+    # of following it, and on an existing file instead of clobbering it, so a
+    # link planted after freeSlug picked the name loses the race.
+    (umask 077; set -C; jq -n --arg name "$name" \
       '{name:$name, baseUrl:"", headers:{}, auth:{type:"none"}, environments:{}, activeEnv:"", requests:[]}' \
       >"$path") || die "cannot write $path"
     jq -nc --arg slug "$slug" --arg path "$path" --arg name "$name" '{slug:$slug, path:$path, name:$name}'
@@ -105,7 +116,7 @@ case ${1:-} in
     chmod 700 "$DIR" 2>/dev/null
     slug=$(freeSlug "$(slugify "$(jq -r '.group.name' <<<"$out")")")
     path="$DIR/$slug.json"
-    (umask 077; jq '.group' <<<"$out" >"$path") || die "cannot write $path"
+    (umask 077; set -C; jq '.group' <<<"$out" >"$path") || die "cannot write $path"
     jq -c --arg slug "$slug" --arg path "$path" \
       '{slug:$slug, path:$path, name:.group.name, requestCount:.requestCount, warnings:.warnings}' <<<"$out"
     ;;

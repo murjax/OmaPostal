@@ -38,13 +38,16 @@ chmod 755 "$TMP/failbin/http-secure"
 mkdir -p "$TMP/harness"
 cp "$HERE/fixtures/secure-harness.qml" "$HERE/../lib/secure.js" "$TMP/harness/"
 
-# run <mode> <bin> -> sets RUN_OUTCOME, RUN_DIRMODE, RUN_FILEMODE, RUN_DIR.
-# Not a subshell, so the caller can also inspect what was written.
+# run <mode> <bin> [prep] -> sets RUN_OUTCOME, RUN_DIRMODE, RUN_FILEMODE, RUN_DIR.
+# `prep` is evaluated with RUN_DIR already set, to seed the directory before
+# the panel starts. Not a subshell, so the caller can also inspect what was
+# written.
 RUN_OUTCOME="" RUN_DIRMODE="" RUN_FILEMODE="" RUN_DIR=""
 run() {
-  local mode=$1 bin=$2 result
+  local mode=$1 bin=$2 prep=${3:-} result
   RUN_DIR=$TMP/run-$((++n))/private
   result=$TMP/result-$n
+  [[ -n $prep ]] && eval "$prep"
   # 022, the umask that makes FileView's 0644 world-readable in the first place.
   ( umask 022
     HARNESS_DIR="$RUN_DIR" HARNESS_BIN="$bin" HARNESS_MODE="$mode" \
@@ -84,5 +87,21 @@ run gated "$TMP/failbin"
 [[ $RUN_GOT == "REFUSED|-|-" ]] \
   && pass "http-secure failing refuses the send instead of writing it unprotected" \
   || fail "failing: expected REFUSED|-|-, got $RUN_GOT"
+
+# ---- and that refusal is what a symlinked scratch path gets -----------------
+# bin/http-secure refuses to follow a symlink at a path it owns; this is the
+# other half of that, end to end. FileView follows a symlink like any other
+# write, so the refusal has to reach the panel and stop the send, or the
+# request payload lands wherever the link points.
+run gated "$HERE/../bin" '
+  mkdir -p "$RUN_DIR"
+  ln -s "$TMP/never-created.json" "$RUN_DIR/request.json"
+'
+[[ $RUN_OUTCOME == "REFUSED" ]] \
+  && pass "a symlinked scratch path refuses the send rather than writing through it" \
+  || fail "symlink: expected REFUSED, got $RUN_OUTCOME"
+[[ ! -e $TMP/never-created.json ]] \
+  && pass "the symlink's target is never created, by http-secure or by FileView" \
+  || fail "symlink: $TMP/never-created.json was created"
 
 exit $rc

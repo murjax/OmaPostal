@@ -87,4 +87,72 @@ grep -q 'umask 077' "$BIN" \
   && pass "the file is created under umask 077, not chmodded after the fact" \
   || fail "http-secure no longer creates files under a restrictive umask"
 
+# ---- symlinked paths are refused, never followed -----------------------------
+# Every path http-secure touches is one the plugin owns outright, so a symlink
+# at any of them is never legitimate — and following one is not harmless: the
+# chmod would land on the target, and the FileView write that follows would put
+# the request payload or the history there. A dangling link is the sharp case,
+# because [[ -e ]] resolves the target and so reads false for it.
+
+sym="$tmp/sym"
+mkdir -p "$sym/private"
+echo "victim data" >"$sym/victim.txt"
+chmod 644 "$sym/victim.txt"
+
+# a dangling symlink at a file path
+ln -s "$sym/never-created.txt" "$sym/private/request.json"
+"$BIN" init "$sym/private" "$sym/private/request.json" >"$tmp/o.json" 2>/dev/null; rc=$?
+[[ $rc -ne 0 ]] && jq -e '.ok == false and (.error | test("symlink"))' "$tmp/o.json" >/dev/null \
+  && pass "a dangling symlink at a file path is refused, naming the symlink" \
+  || fail "dangling symlink (rc=$rc): $(cat "$tmp/o.json")"
+[[ ! -e $sym/never-created.txt ]] \
+  && pass "the dangling symlink's target is not created" \
+  || fail "http-secure created $sym/never-created.txt through the symlink"
+rm -f "$sym/private/request.json"
+
+# a symlink at a file path that resolves to a real file
+ln -s "$sym/victim.txt" "$sym/private/request.json"
+"$BIN" init "$sym/private" "$sym/private/request.json" >"$tmp/o.json" 2>/dev/null; rc=$?
+[[ $rc -ne 0 ]] && jq -e '.ok == false and (.error | test("symlink"))' "$tmp/o.json" >/dev/null \
+  && pass "a resolving symlink at a file path is refused too" \
+  || fail "live symlink (rc=$rc): $(cat "$tmp/o.json")"
+[[ $(stat -c '%a' "$sym/victim.txt") == "644" && $(cat "$sym/victim.txt") == "victim data" ]] \
+  && pass "the symlink's target keeps its mode and contents" \
+  || fail "victim.txt is now $(stat -c '%a' "$sym/victim.txt") / $(cat "$sym/victim.txt")"
+rm -f "$sym/private/request.json"
+
+# a symlink standing in for the private directory
+mkdir -p "$sym/elsewhere"
+chmod 755 "$sym/elsewhere"
+ln -s "$sym/elsewhere" "$sym/dirlink"
+"$BIN" init "$sym/dirlink" "$sym/dirlink/request.json" >"$tmp/o.json" 2>/dev/null; rc=$?
+[[ $rc -ne 0 ]] && jq -e '.ok == false and (.error | test("symlink"))' "$tmp/o.json" >/dev/null \
+  && pass "a symlink standing in for the private directory is refused" \
+  || fail "dir symlink (rc=$rc): $(cat "$tmp/o.json")"
+[[ $(stat -c '%a' "$sym/elsewhere") == "755" && ! -e $sym/elsewhere/request.json ]] \
+  && pass "the linked-to directory is neither chmodded nor written into" \
+  || fail "elsewhere is now $(stat -c '%a' "$sym/elsewhere"), request.json present: $([[ -e $sym/elsewhere/request.json ]] && echo yes || echo no)"
+
+# anything that is not a regular file is refused as well
+mkfifo "$sym/private/fifo.json"
+"$BIN" init "$sym/private" "$sym/private/fifo.json" >"$tmp/o.json" 2>/dev/null; rc=$?
+[[ $rc -ne 0 ]] && jq -e '.ok == false and (.error | test("regular file"))' "$tmp/o.json" >/dev/null \
+  && pass "a fifo at a file path is refused" \
+  || fail "fifo (rc=$rc): $(cat "$tmp/o.json")"
+rm -f "$sym/private/fifo.json"
+
+# and the ordinary case still works in that same directory
+"$BIN" init "$sym/private" "$sym/private/request.json" >"$tmp/o.json" 2>/dev/null \
+  && [[ $(stat -c '%a' "$sym/private/request.json") == "600" ]] \
+  && pass "a real path in a directory that had a symlink is still secured" \
+  || fail "recovery after symlink: $(cat "$tmp/o.json")"
+
+# ---- the create refuses a symlink atomically, not by checking first ----------
+# [[ -L ]] before the create would still lose to a link planted between the
+# test and the open. `set -C` makes the create itself O_CREAT|O_EXCL, which
+# fails on a symlink, so the race has no winning side.
+grep -q 'set -C' "$BIN" \
+  && pass "the create uses noclobber (O_CREAT|O_EXCL), not just a prior test" \
+  || fail "http-secure no longer creates files with noclobber"
+
 exit $((fails > 0 ? 1 : 0))

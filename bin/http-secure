@@ -19,7 +19,14 @@
 # preserve the mode of a file that already exists, so creating (or repairing)
 # the file here first makes every later write 0600. Idempotent: safe to run on
 # every panel open, and it converges even if a write beat it to the file.
+#
+# Every path here is one this plugin owns outright, so none of them is ever
+# legitimately a symlink, and following one would take both the write and the
+# chmod somewhere this plugin did not choose. They are refused rather than
+# resolved — see secureFile.
 set -uo pipefail
+
+ERR=""
 
 die() {
   jq -nc --arg err "$1" '{ok:false,dir:"",files:[],error:$err}'
@@ -29,23 +36,61 @@ die() {
 secureFile() {
   local f=$1 parent
   parent=$(dirname "$f")
-  mkdir -p "$parent" || return 1
-  # umask 077 inside the subshell so the file is 0600 from creation rather than
-  # existing as 0644 for the moment before the chmod below.
-  [[ -e $f ]] || (umask 077; : >"$f") || return 1
-  chmod 600 "$f" || return 1
+  # The parent's own mode is left alone; see the note at the top of the file.
+  mkdir -p "$parent" || { ERR="cannot create $parent"; return 1; }
+
+  # An existing symlink is refused outright. chmod follows it, so repairing a
+  # symlinked history path would set 0600 on whatever it points at, and the
+  # FileView write that follows would put the request history — headers,
+  # bodies, the resolved snapshot — into that unrelated file.
+  if [[ -L $f ]]; then
+    ERR="refusing to follow the symlink at $f"
+    return 1
+  fi
+
+  if [[ ! -e $f ]]; then
+    # `set -C` makes this an O_CREAT|O_EXCL open, which fails on a symlink
+    # instead of following it. That is what closes the dangling-symlink case:
+    # [[ -e ]] above is false for a dangling link because it resolves the
+    # target, so the plain redirect this replaces would have created that
+    # target — an arbitrary path — as a side effect of opening the panel.
+    # O_EXCL also makes the create atomic, so a link planted between the test
+    # and the open loses the race rather than winning it.
+    # umask 077 so the file is 0600 from creation rather than existing as
+    # 0644 for the moment before the chmod below.
+    ( umask 077; set -C; : >"$f" ) 2>/dev/null || {
+      ERR="cannot create $f"
+      return 1
+    }
+  fi
+
+  # A fifo or device at one of these paths would send the write somewhere
+  # unintended too, and FileView would block on a fifo.
+  if [[ ! -f $f ]]; then
+    ERR="$f is not a regular file"
+    return 1
+  fi
+
+  chmod 600 "$f" || { ERR="cannot chmod 600 $f"; return 1; }
 }
 
 case ${1:-} in
   init)
     dir=${2:-}
     [[ -n $dir ]] || die "usage: http-secure init <private-dir> [file ...]"
-    mkdir -p "$dir" || die "cannot create $dir"
+    # Same reasoning as secureFile: mkdir -p accepts an existing symlink and
+    # chmod follows it, which would set 0700 on a directory of someone else's
+    # choosing and put every scratch file inside it.
+    [[ -L $dir ]] && die "refusing to follow the symlink at $dir"
+    # umask 077 so the directory is 0700 from creation, with no window in
+    # which it exists as 0755.
+    ( umask 077; mkdir -p "$dir" ) || die "cannot create $dir"
+    [[ -d $dir ]] || die "$dir is not a directory"
     chmod 700 "$dir" || die "cannot chmod 700 $dir"
     shift 2
     for f in "$@"; do
       [[ -n $f ]] || continue
-      secureFile "$f" || die "cannot secure $f"
+      secureFile "$f" || die "$ERR"
     done
     jq -nc --arg dir "$dir" --args '{ok:true, dir:$dir, files:$ARGS.positional, error:""}' "$@"
     ;;
