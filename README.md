@@ -254,7 +254,13 @@ committing or sharing a group file.
 Every file the plugin writes is created `0600` inside a `0700` directory (group
 files, the history file and the request scratch files), so no other local user
 can read them at rest — group directories and files created by an earlier
-version are repaired in place the next time the panel opens. Nothing the plugin
+version are repaired in place the next time the panel opens. That repair runs
+as a process (`bin/http-secure`), so the panel holds back every write that can
+carry a credential until it has finished: Quickshell's `FileView` has no
+file-mode option and would otherwise create a missing directory `0755` and a
+new file `0644`, exposing the request before the repair landed. A send issued
+in that window is deferred and then sent; if the repair fails outright the send
+is refused with the error rather than written unprotected. Nothing the plugin
 copies to the clipboard is passed on a command line, since `wl-copy` stays
 resident to serve the selection and its arguments would be readable from
 `/proc` for as long as the clipboard held them.
@@ -296,8 +302,12 @@ Security-specific regression tests: that no secret reaches the command line of
 `curl` or of any `jq` invocation; that credentials are masked in `resolved`
 wherever they came from, while the real values still reach the server; that
 group directories/files and the history file end up `0600`/`0700` under a
-permissive umask and are repaired if they were not; and that `export`/`delete`
-cannot be pointed outside the groups directory.
+permissive umask and are repaired if they were not; that a send racing
+`bin/http-secure` waits for it instead of writing the request `0644`, and is
+refused if securing fails (`tests/test-panel-secure.sh`, which runs the real
+gate and the real `FileView` under a headless `quickshell` and is skipped if
+`qs` is absent); and that `export`/`delete` cannot be pointed outside the
+groups directory.
 
 ## Limitations
 

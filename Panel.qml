@@ -7,6 +7,7 @@ import qs.Commons
 import "lib/history.js" as History
 import "lib/groups.js" as Groups
 import "lib/json.js" as Json
+import "lib/secure.js" as Secure
 
 // Bar widget: a small HTTP client.
 //
@@ -50,6 +51,9 @@ Panel {
   property var reqAuth: "inherit"    // "inherit" | "none" | {type,...}; group mode only
 
   property bool sending: false
+  // Holds back any FileView write that can carry a credential until
+  // http-secure has made the files 0600 — see the Process below.
+  property var secureGate: Secure.create()
   property bool curlCopying: false
   property int sendSeq: 0            // bumped per send and per cancel; stale results are dropped
   property bool startPending: false  // a send is waiting for a cancelled run to finish exiting
@@ -137,6 +141,12 @@ Panel {
     root.envName = envs.indexOf(want) >= 0 ? want : (envs.length > 0 ? envs[0] : "")
   }
 
+  // The third credential-bearing FileView write, and the one that needs no
+  // secureGate: groupPath is only ever set from a path `http-groups list`
+  // returned, and list chmods the groups directory 0700 and every group file
+  // 0600 before it prints them. So the repair is already complete by the time
+  // this file can be addressed at all — the ordering send() had to be given
+  // explicitly comes for free here.
   function saveGroup(g) {
     root.group = g
     groupFile.setText(JSON.stringify(g, null, 2) + "\n")
@@ -250,20 +260,31 @@ Panel {
   // Failure here is not cosmetic — it means the history file may still be
   // world-readable — so it is reported rather than swallowed, unlike the
   // printErrors:false FileViews below.
+  //
+  // It is a process, so it settles several event loop turns after the panel
+  // opens, and a send() can be issued in that window. Everything that writes a
+  // credential through FileView therefore goes through secureGate (lib/secure.js)
+  // and is deferred until this run has exited, rather than racing it: FileView
+  // would otherwise create the scratch directory 0755 and the file 0644 and
+  // put the request's Authorization header in both before the repair landed.
   Process {
     id: secureProc
     command: [root.scriptDir + "/http-secure", "init", root.scratchDir,
       root.requestPath, root.curlRequestPath, root.historyPath]
     stdout: StdioCollector { id: secureOut; waitForEnd: true }
     onExited: function (code) {
-      if (code === 0) return
       var parsed = Json.tryParse(String(secureOut.text || "").trim(), null)
-      root.setImportMessage(root.procError(parsed, "could not restrict permissions on the plugin's private files"), true)
+      var err = root.procError(parsed, "could not restrict permissions on the plugin's private files")
+      var queued = Secure.settle(root.secureGate, code === 0, err)
+      if (code !== 0) root.setImportMessage(err, true)
+      for (var i = 0; i < queued.length; i++) queued[i]()
     }
   }
 
   function secureFiles() {
-    if (!secureProc.running) secureProc.running = true
+    if (secureProc.running) return
+    Secure.markRunning(root.secureGate)
+    secureProc.running = true
   }
 
   // The scratch files hold the request's own Authorization header, API key and
@@ -444,6 +465,16 @@ Panel {
 
   function send() {
     if (!canSend()) return
+    // The request payload holds this request's own Authorization header, API
+    // key and body, so it must not reach the scratch file before http-secure
+    // has made that file 0600 inside a 0700 directory.
+    var gate = Secure.check(root.secureGate, root.send)
+    if (gate === "wait") { root.secureFiles(); return }
+    if (gate === "refuse") {
+      root.response = { ok: false, status: 0, statusText: "", timeMs: 0, sizeBytes: 0,
+        headers: {}, body: "", truncated: false, error: root.secureGate.error }
+      return
+    }
     if (root.groupPath !== "" && !root.group) {
       root.response = { ok: false, status: 0, statusText: "", timeMs: 0, sizeBytes: 0,
         headers: {}, body: "", truncated: false, error: "group file could not be read" }
@@ -611,6 +642,10 @@ Panel {
   // without sending anything.
   function copyAsCurl() {
     if (!root.canSend() || root.curlCopying) return
+    // Same payload, same gate: http-curl resolves the real auth values from it.
+    var gate = Secure.check(root.secureGate, root.copyAsCurl)
+    if (gate === "wait") { root.secureFiles(); return }
+    if (gate === "refuse") { root.setImportMessage(root.secureGate.error, true); return }
     var trimmedUrl = root.url.trim()
     var payload = root.buildRequestPayload(trimmedUrl, headersEditor.current())
     root.curlCopying = true
@@ -632,6 +667,12 @@ Panel {
 
   function addHistoryEntry(req, resp) {
     if (!req) return
+    // An entry carries the request's headers, body and resolved snapshot, so
+    // the history file is gated the same way. Deferring is safe because req
+    // and resp are captured here rather than read back off the panel.
+    var gate = Secure.check(root.secureGate, function () { root.addHistoryEntry(req, resp) })
+    if (gate === "wait") { root.secureFiles(); return }
+    if (gate === "refuse") { root.setImportMessage(root.secureGate.error, true); return }
     var entry = {
       id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
       method: req.method, url: req.url, headers: req.headers, body: req.body,
